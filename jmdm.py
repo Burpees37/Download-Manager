@@ -36,9 +36,10 @@ import urllib.error
 import http.server
 import http.client
 import html.parser
+import base64
 
 APP_NAME = "JM Download Manager"
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 CHUNK = 64 * 1024
@@ -166,6 +167,8 @@ def looks_like_download(text):
         return False
     if is_video_url(text) and ("watch" in text or "youtu.be" in text
                                or "/videos/" in text or "/reel" in text):
+        return True
+    if is_gate_url(text):
         return True
     path = urllib.parse.urlparse(text).path.lower()
     return path.rsplit(".", 1)[-1] in FILE_EXTS if "." in path else False
@@ -309,6 +312,8 @@ class Download:
         self.active_conns = 0
         self.hosts_active = 0
         self.note = ""              # e.g. "1 mirror skipped: different file size"
+        # the gate.php-style link this file came from: {"url","referer","cookie"}
+        self.gate = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
@@ -334,7 +339,8 @@ class Download:
                 "referer": self.referer, "cookie": self.cookie,
                 "user_agent": self.user_agent, "mirrors": self.mirrors,
                 "status": self.status, "error": self.error, "segments": segs,
-                "downloaded": self.downloaded, "added": self.added}
+                "downloaded": self.downloaded, "added": self.added,
+                "gate": self.gate}
 
     @classmethod
     def from_dict(cls, manager, d):
@@ -352,6 +358,7 @@ class Download:
         obj.segments = [Segment(a, b, p) for a, b, p in d.get("segments", [])]
         obj.downloaded = d.get("downloaded", 0)
         obj.added = d.get("added", time.time())
+        obj.gate = d.get("gate") or {}
         return obj
 
     # ---- control ---------------------------------------------------------
@@ -433,31 +440,47 @@ class Download:
         return urllib.request.urlopen(req, timeout=timeout)
 
     def _probe(self):
-        resp = self._open(self._main_source(), 0, None)
+        # A gate link (gate.php, go.php …) or redirect page is followed to the
+        # real file; a plain file link is just one request, as before.
+        g = self.gate or {"url": self.url, "referer": self.referer, "cookie": self.cookie}
+        r = resolve_link(g["url"], g["referer"], g["cookie"], self.user_agent)
+        info = r["info"]
+        if r["via_page"]:
+            self.gate = g
+            self.url, self.referer, self.cookie = r["url"], r["referer"], r["cookie"]
+        self.size = info["size"]
+        self.resumable = info["resumable"]
+        if not self.path:
+            name = sanitize(self.filename) if self.filename else info["filename"]
+            if not self.filename and re.fullmatch(r"(?i)[\w.-]+\.php", name):
+                name = "download"                   # a script's name isn't the file's
+            os.makedirs(self.folder, exist_ok=True)
+            self.path = unique_path(self.folder, name)
+            self.filename = os.path.basename(self.path)
+        self.segments = []
+
+    def _refresh_gate(self):
+        """Resuming a file that came through a gate link: the file link it gave
+        may have expired, so go through the gate again and use the new link if
+        it leads to the same file."""
+        g = self.gate
         try:
-            info = parse_probe(resp)
-            if info["html"]:
-                raise IOError("This link opens a web page, not a file. Open it in your "
-                              "browser and click Download there — the extension will "
-                              "catch the real file.")
-            self.size = info["size"]
-            self.resumable = info["resumable"]
-            if not self.path:
-                name = sanitize(self.filename) if self.filename else info["filename"]
-                os.makedirs(self.folder, exist_ok=True)
-                self.path = unique_path(self.folder, name)
-                self.filename = os.path.basename(self.path)
-            self.segments = []
-        finally:
-            resp.close()
+            r = resolve_link(g["url"], g.get("referer", ""), g.get("cookie", ""),
+                             self.user_agent)
+        except Exception:
+            return                                  # keep the old link and try it
+        if r["info"]["size"] == self.size:
+            self.url, self.referer, self.cookie = r["url"], r["referer"], r["cookie"]
 
     def _check_mirror(self, m):
         """A mirror is only used if it serves exactly the same size with ranges."""
-        resp = self._open(m, 0, None, timeout=20)
-        try:
-            info = parse_probe(resp)
-        finally:
-            resp.close()
+        g = m.get("gate") or m
+        r = resolve_link(g["url"], g.get("referer", ""), g.get("cookie", ""),
+                         m.get("user_agent", "") or self.user_agent)
+        info = r["info"]
+        if r["via_page"]:
+            m["gate"] = {k: g.get(k, "") for k in ("url", "referer", "cookie")}
+            m.update(url=r["url"], referer=r["referer"], cookie=r["cookie"])
         if not info["resumable"]:
             raise IOError("host doesn't allow split downloads")
         if info["size"] != self.size:
@@ -510,6 +533,8 @@ class Download:
             os.makedirs(self.folder, exist_ok=True)
             if self.size is None or not self.path:
                 self._probe()
+            elif self.gate:
+                self._refresh_gate()
             part = self.path + ".part"
             if not os.path.exists(part) or not self.resumable or not self.segments:
                 self._init_segments()
@@ -1150,10 +1175,12 @@ class _PageScan(html.parser.HTMLParser):
         self.iframes = []
         self.images = []         # (src, attrs)
         self.meta = {}
+        self.forms = []          # {"action","method","attrs","fields":[(name,value)],"text"}
         self.title = ""
         self.h1 = ""
         self._a = None
         self._in = None
+        self._form = None
 
     def handle_starttag(self, tag, attrs):
         a = {k.lower(): (v or "") for k, v in attrs}
@@ -1174,8 +1201,24 @@ class _PageScan(html.parser.HTMLParser):
                 self.meta.setdefault(key, a["content"])
         elif tag in ("title", "h1"):
             self._in = tag
+        if tag == "form":
+            self._form = {"action": a.get("action", ""), "method": a.get("method", "get"),
+                          "attrs": a, "fields": [], "text": "", "visible": 0}
+            self.forms.append(self._form)
+        elif tag in ("input", "button", "select", "textarea") and self._form is not None:
+            typ = a.get("type", "submit" if tag == "button" else "text").lower()
+            self._form["text"] += " " + " ".join(
+                (a.get("name", ""), a.get("id", ""), a.get("class", ""), a.get("value", "")))
+            if typ in ("text", "email", "password", "search", "number") or tag in ("select", "textarea"):
+                self._form["visible"] += 1
+            if a.get("name") and (typ not in ("submit", "button", "image", "reset",
+                                               "checkbox", "radio") or "checked" in a
+                                  or typ == "submit"):
+                self._form["fields"].append((a["name"], a.get("value", "")))
 
     def handle_endtag(self, tag):
+        if tag == "form":
+            self._form = None
         if tag == "a":
             self._a = None
         if tag == self._in:
@@ -1184,6 +1227,8 @@ class _PageScan(html.parser.HTMLParser):
     def handle_data(self, data):
         if self._a is not None:
             self._a[1] += data
+        if self._form is not None and len(self._form["text"]) < 2000:
+            self._form["text"] += " " + data
         if self._in == "title":
             self.title += data
         elif self._in == "h1" and len(self.h1) < 200:
@@ -1311,6 +1356,293 @@ def find_episode_media(html_text, base, scan=None):
         if u.startswith(("http://", "https://")):
             return u, "page"
     return None, None
+
+
+# --------------------------------------------------------------------------
+# gate / redirect links (gate.php, go.php, out.php, download.php …)
+# --------------------------------------------------------------------------
+# Query keys that usually carry the real link inside a gate link.
+GATE_PARAMS = {"url", "u", "link", "l", "go", "goto", "target", "dest", "destination",
+               "to", "out", "redirect", "redir", "r", "file", "f", "dl", "download",
+               "q", "data", "s", "site", "href", "path", "src"}
+_GATE_NAME = re.compile(r"/(?:gate|go|goto|out|dl|down|download|get|getfile|file|files|"
+                        r"redirect|redir|link|links|safe|safelink|r|away|jump|click|"
+                        r"track|external|leave|forward|fwd|ref|visit|exit)\.php$", re.I)
+_META_REFRESH = re.compile(
+    r"""<meta[^>]+http-equiv\s*=\s*["']?refresh["']?[^>]*?content\s*=\s*["']\s*\d*\s*[;,]?\s*"""
+    r"""url\s*=\s*['"]?([^"'>\s]+)"""
+    r"""|<meta[^>]+content\s*=\s*["']\s*\d*\s*[;,]?\s*url\s*=\s*['"]?([^"'>\s]+)['"]?[^>]*"""
+    r"""http-equiv\s*=\s*["']?refresh""", re.I)
+_JS_REDIRECT = re.compile(
+    r"""(?:(?:window|document|top|self|parent)\.)?location(?:\.href)?\s*=\s*(["'`])(.+?)\1"""
+    r"""|location\.(?:replace|assign)\(\s*(["'`])(.+?)\3\s*\)"""
+    r"""|window\.open\(\s*(["'`])(https?://.+?)\5""", re.I)
+_CAPTCHA = re.compile(r"g-recaptcha|h-captcha|hcaptcha\.com|cf-turnstile|"
+                      r"challenges\.cloudflare\.com|name=[\"']?captcha", re.I)
+_FILE_IN_TEXT = re.compile(r"""https?://[^\s"'<>\\]+?\.(?:%s)(?:\?[^\s"'<>\\]*)?(?=["'\s<\\]|$)"""
+                           % "|".join(sorted(FILE_EXTS, key=len, reverse=True)), re.I)
+
+
+def _decode_target(value):
+    """A link hidden in a query value: plain/URL-encoded, base64 (also
+    URL-safe or reversed) or hex. Returns the link or None."""
+    v = urllib.parse.unquote(value or "").strip()
+    if re.match(r"^https?://\S+$", v, re.I):
+        return v
+    if v.startswith("//") and "." in v[2:]:
+        return "https:" + v
+    s = re.sub(r"\s", "", v)
+    if len(s) >= 12 and re.fullmatch(r"[A-Za-z0-9+/_=-]+", s):
+        for cand in (s, s[::-1]):
+            c = cand.rstrip("=").replace("-", "+").replace("_", "/")
+            try:
+                t = base64.b64decode(c + "=" * (-len(c) % 4)).decode("utf-8").strip()
+            except Exception:
+                continue
+            if re.match(r"^https?://\S+$", t, re.I):
+                return t
+            if t != v and re.match(r"^(?:https?%3A|aHR0c)", t, re.I):
+                return _decode_target(t)              # encoded twice
+    if len(s) >= 20 and len(s) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", s):
+        try:
+            t = bytes.fromhex(s).decode("utf-8").strip()
+            if re.match(r"^https?://\S+$", t, re.I):
+                return t
+        except Exception:
+            pass
+    return None
+
+
+def gate_target(url):
+    """The real link carried inside a gate link (?url=…, base64 …), or None."""
+    best = None
+    for part in urllib.parse.urlsplit(url).query.split("&"):
+        k, _, v = part.partition("=")
+        t = _decode_target(v)
+        if t and t != url:
+            if k.lower() in GATE_PARAMS:
+                return t
+            best = best or t
+    return best
+
+
+def is_gate_url(url):
+    """gate.php / go.php / out.php style links, or any .php link that carries
+    another link inside it."""
+    p = urllib.parse.urlsplit(url)
+    if _GATE_NAME.search(p.path):
+        return True
+    return p.path.lower().endswith(".php") and gate_target(url) is not None
+
+
+class _Jar:
+    """Minimal cookie jar: gates often set a session cookie on the redirect
+    that the file server then checks."""
+
+    def __init__(self, host, cookie):
+        self.c = {}
+        for part in (cookie or "").split(";"):
+            n, _, v = part.strip().partition("=")
+            if n:
+                self.c.setdefault((host or "").lower(), {})[n] = v
+
+    def absorb(self, host, headers):
+        try:
+            items = headers.get_all("Set-Cookie") or []
+        except Exception:
+            items = []
+        for sc in items:
+            first, *attrs = sc.split(";")
+            n, _, v = first.partition("=")
+            n = n.strip()
+            if not n:
+                continue
+            dom, gone = (host or "").lower(), False
+            for at in attrs:
+                k, _, val = at.strip().partition("=")
+                k = k.lower()
+                if k == "domain" and val.strip():
+                    dom = val.strip().lstrip(".").lower()
+                elif k == "max-age" and re.fullmatch(r"-?\d+", val.strip()) \
+                        and int(val.strip()) <= 0:
+                    gone = True
+            jar = self.c.setdefault(dom, {})
+            if gone:
+                jar.pop(n, None)
+            else:
+                jar[n] = v.strip()
+
+    def header(self, host):
+        host, out = (host or "").lower(), {}
+        for dom, kv in self.c.items():
+            if host == dom or host.endswith("." + dom):
+                out.update(kv)
+        return "; ".join(f"{k}={v}" for k, v in out.items())
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **kw):
+        return None                                  # we follow them ourselves
+
+
+_GATE_OPENER = None
+
+
+def _gate_opener():
+    global _GATE_OPENER
+    if _GATE_OPENER is None:
+        _GATE_OPENER = urllib.request.build_opener(_NoRedirect)
+    return _GATE_OPENER
+
+
+def _next_hop(text, page_url, came_from_url):
+    """Where a gate page sends you. Returns (url, method, body) or None.
+    Order: the page's own redirect, then the link packed into the gate URL,
+    then the page's Download link/button (same site first, so an ad's
+    "Download" button elsewhere on the page loses)."""
+    def ok(u):
+        u = urllib.parse.urljoin(page_url, html.unescape(u.strip()).replace("\\/", "/"))
+        u = u.split("#")[0]
+        if u.startswith(("http://", "https://")) and u != page_url:
+            return u
+        return None
+
+    m = _META_REFRESH.search(text)
+    if m and ok(m.group(1) or m.group(2)):
+        return ok(m.group(1) or m.group(2)), "GET", None
+    for m in _JS_REDIRECT.finditer(text):
+        target = m.group(2) or m.group(4) or m.group(6) or ""
+        if "+" in target and re.search(r"['\"`]\s*\+", m.group(0)):
+            continue                                  # built from variables
+        if ok(target):
+            return ok(target), "GET", None
+
+    packed = gate_target(page_url)
+    if packed and packed != page_url and packed != came_from_url:
+        return packed, "GET", None
+
+    p = scan_page(text)
+    here = urllib.parse.urlsplit(page_url).hostname
+    links = []
+    for href, label, attrs in p.links:
+        u = ok(href) if not href.lower().startswith(("javascript:", "mailto:", "#")) else None
+        if u:
+            links.append((u, re.sub(r"\s+", " ", label).strip(), attrs))
+    links.sort(key=lambda x: urllib.parse.urlsplit(x[0]).hostname != here)
+    # 1) a link straight to a file (.zip, .exe, .mp4 …)
+    for u, label, attrs in links:
+        ext = urllib.parse.urlsplit(u).path.rsplit(".", 1)[-1].lower()
+        if ext in FILE_EXTS or "download" in attrs:
+            return u, "GET", None
+    # 2) the page's Download button
+    for u, label, attrs in links:
+        hint = " ".join((label, attrs.get("id", ""), attrs.get("class", ""),
+                         attrs.get("title", ""))).lower()
+        if re.search(r"\bdownload|\bdl\b|get (?:the )?file|direct link|click here to (?:download|continue)", hint) \
+                and u != came_from_url:
+            return u, "GET", None
+    # 3) a download form with only hidden fields (a plain button, no captcha)
+    for f in p.forms:
+        hint = (f["text"] + " " + " ".join(f["attrs"].values())).lower()
+        if f["visible"] == 0 and re.search(r"download|\bdl\b|\bget\b|continue|proceed", hint):
+            action = ok(f["action"]) if f["action"] else page_url
+            if not action:
+                continue
+            data = urllib.parse.urlencode(f["fields"]).encode()
+            if f["method"].lower() == "post":
+                return action, "POST", data
+            sep = "&" if "?" in action else "?"
+            return action + (sep + data.decode() if data else ""), "GET", None
+    # 4) a file link written into the page's scripts
+    m = _FILE_IN_TEXT.search(text)
+    if m and ok(m.group(0)):
+        return ok(m.group(0)), "GET", None
+    return None
+
+
+def resolve_link(url, referer="", cookie="", user_agent="", max_hops=10):
+    """Follow a link until it reaches the actual file. Handles plain HTTP
+    redirects (keeping cookies set along the way, which gates often need),
+    meta-refresh and JavaScript redirects, the real link packed into a
+    gate.php?url=… link (plain, base64 or hex), and gate pages with one
+    Download link or button. Returns
+    {"url", "referer", "cookie", "info", "via_page"}, where info is
+    parse_probe() of the file response. Timers and captchas are not bypassed:
+    those pages raise an error asking you to use the browser."""
+    start = url
+    jar = _Jar(urllib.parse.urlsplit(url).hostname, cookie)
+    method, body = "GET", None
+    seen, hops, via_page, came_from = set(), 0, False, ""
+    while True:
+        key = (method, url, body)
+        if key in seen or hops > max_hops:
+            raise IOError("The link keeps redirecting without reaching a file. Open it "
+                          "in your browser and click Download — the extension will "
+                          "catch the real file.")
+        seen.add(key)
+        host = urllib.parse.urlsplit(url).hostname
+        h = {"User-Agent": user_agent or UA, "Accept": "*/*",
+             "Accept-Encoding": "identity"}
+        if body is None:
+            h["Range"] = "bytes=0-"
+        else:
+            h["Content-Type"] = "application/x-www-form-urlencoded"
+        if referer:
+            h["Referer"] = referer
+        c = jar.header(host)
+        if c:
+            h["Cookie"] = c
+        req = urllib.request.Request(url, data=body, headers=h, method=method)
+        try:
+            resp = _gate_opener().open(req, timeout=20)
+        except urllib.error.HTTPError as e:
+            jar.absorb(host, e.headers)
+            loc = e.headers.get("Location") if e.headers else None
+            if e.code in (301, 302, 303, 307, 308) and loc:
+                e.close()
+                if e.code in (301, 302, 303):
+                    method, body = "GET", None
+                url = urllib.parse.urljoin(url, loc.strip())
+                hops += 1
+                continue
+            if e.code in (403, 429, 503) and hops and _CAPTCHA.search(
+                    e.read(65536).decode("utf-8", "replace")):
+                raise IOError("This site wants a captcha / browser check first. Open the "
+                              "link in your browser, finish it and click Download — the "
+                              "extension will catch the real file.")
+            raise
+        jar.absorb(host, resp.headers)
+        info = parse_probe(resp)
+        cd = (resp.headers.get("Content-Disposition") or "").lower()
+        if not info["html"] or "attachment" in cd:
+            resp.close()
+            info["html"] = False
+            if body is not None:
+                raise IOError("This site only sends the file in answer to a form, which "
+                              "can't be split into parts. Open the link in your browser "
+                              "and click Download — the extension will catch it.")
+            final_cookie = jar.header(host)
+            return {"url": url, "referer": referer, "cookie": final_cookie,
+                    "info": info,
+                    # True when the plain link alone won't work again: it needed a
+                    # gate page, or cookies the gate handed out on the way
+                    "via_page": via_page or (url != start and final_cookie != (cookie or ""))}
+        raw = resp.read(2 * 1024 * 1024)
+        resp.close()
+        text = raw.decode(resp.headers.get_content_charset() or "utf-8", errors="replace")
+        nxt = _next_hop(text, url, came_from)
+        if nxt is None:
+            if _CAPTCHA.search(text):
+                raise IOError("This page asks for a captcha first. Open the link in your "
+                              "browser, solve it and click Download — the extension will "
+                              "catch the real file.")
+            raise IOError("This link opens a web page, not a file. Open it in your "
+                          "browser and click Download there — the extension will "
+                          "catch the real file.")
+        came_from, referer = url, url              # browsers send the page as Referer
+        url, method, body = nxt
+        via_page = True
+        hops += 1
 
 
 # --------------------------------------------------------------------------
@@ -1589,6 +1921,10 @@ class Manager:
         d.segments, d.downloaded, d.size = [], 0, None
         if d.kind == "file":
             d.path = ""
+            if d.gate:
+                d.url, d.referer, d.cookie = (d.gate["url"], d.gate.get("referer", ""),
+                                              d.gate.get("cookie", ""))
+                d.gate = {}
         d.status = "Queued"
         self.mark_dirty()
 
@@ -1706,7 +2042,7 @@ class Manager:
                               if isinstance(x, (list, tuple)) and x],
                 }
                 self._reply(200, {"ok": True})
-                if not job["video"] and not job["series"]:
+                if not job["video"] and not job["series"] and not is_gate_url(url):
                     # same size as a file already downloading -> offer it as a mirror
                     try:
                         info = probe_info(url, job["referer"], job["cookie"],
@@ -2311,7 +2647,8 @@ def run_gui(initial_url=None):
                 first = last_clip[0] is None
                 last_clip[0] = txt
                 if not first and looks_like_download(txt) \
-                        and not any(x.url == txt for x in mgr.downloads):
+                        and not any(txt in (x.url, (x.gate or {}).get("url"))
+                                    for x in mgr.downloads):
                     add_dialog(txt)
         root.after(1000, check_clipboard)
 
