@@ -312,8 +312,10 @@ class Download:
         self.active_conns = 0
         self.hosts_active = 0
         self.note = ""              # e.g. "1 mirror skipped: different file size"
-        # the gate.php-style link this file came from: {"url","referer","cookie"}
+        # the gate.php-style link this file came from: {"url","referer","cookie","post"}
         self.gate = {}
+        self.post = ""              # form data, when the file only comes back for a form
+        self._pending = None        # that form's answer, already open
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
@@ -340,7 +342,7 @@ class Download:
                 "user_agent": self.user_agent, "mirrors": self.mirrors,
                 "status": self.status, "error": self.error, "segments": segs,
                 "downloaded": self.downloaded, "added": self.added,
-                "gate": self.gate}
+                "gate": self.gate, "post": self.post}
 
     @classmethod
     def from_dict(cls, manager, d):
@@ -359,6 +361,7 @@ class Download:
         obj.downloaded = d.get("downloaded", 0)
         obj.added = d.get("added", time.time())
         obj.gate = d.get("gate") or {}
+        obj.post = d.get("post", "")
         return obj
 
     # ---- control ---------------------------------------------------------
@@ -422,7 +425,7 @@ class Download:
     # ---- network ---------------------------------------------------------
     def _main_source(self):
         return {"url": self.url, "referer": self.referer, "cookie": self.cookie,
-                "user_agent": self.user_agent}
+                "user_agent": self.user_agent, "post": self.post}
 
     def _headers(self, src):
         h = {"User-Agent": src.get("user_agent") or UA, "Accept": "*/*",
@@ -434,6 +437,11 @@ class Download:
         return h
 
     def _open(self, src, start=None, end=None, timeout=30):
+        if src.get("post"):
+            h = dict(self._headers(src), **{"Content-Type": "application/x-www-form-urlencoded"})
+            req = urllib.request.Request(src["url"], data=src["post"].encode(), headers=h,
+                                         method="POST")
+            return urllib.request.urlopen(req, timeout=timeout)
         req = urllib.request.Request(src["url"], headers=self._headers(src))
         if start is not None:
             req.add_header("Range", f"bytes={start}-" + ("" if end is None else str(end)))
@@ -442,22 +450,36 @@ class Download:
     def _probe(self):
         # A gate link (gate.php, go.php …) or redirect page is followed to the
         # real file; a plain file link is just one request, as before.
-        g = self.gate or {"url": self.url, "referer": self.referer, "cookie": self.cookie}
-        r = resolve_link(g["url"], g["referer"], g["cookie"], self.user_agent)
+        g = self.gate or {"url": self.url, "referer": self.referer, "cookie": self.cookie,
+                          "post": self.post}
+        r = resolve_link(g["url"], g["referer"], g["cookie"], self.user_agent,
+                         post=g.get("post") or None, keep_response=True)
+        self.use_resolved(g, r)
         info = r["info"]
-        if r["via_page"]:
-            self.gate = g
-            self.url, self.referer, self.cookie = r["url"], r["referer"], r["cookie"]
         self.size = info["size"]
         self.resumable = info["resumable"]
         if not self.path:
-            name = sanitize(self.filename) if self.filename else info["filename"]
-            if not self.filename and re.fullmatch(r"(?i)[\w.-]+\.php", name):
+            name = sanitize(self.filename) if self.filename and \
+                not _script_name(self.filename) else info["filename"]
+            if _script_name(name):
                 name = "download"                   # a script's name isn't the file's
             os.makedirs(self.folder, exist_ok=True)
             self.path = unique_path(self.folder, name)
             self.filename = os.path.basename(self.path)
         self.segments = []
+
+    def use_resolved(self, g, r):
+        """Take over what resolve_link() found for gate g."""
+        if r["via_page"]:
+            self.gate = dict(g)
+            self.url, self.referer, self.cookie = r["url"], r["referer"], r["cookie"]
+            self.post = r.get("post", "")
+        if r.get("response") is not None:
+            if self._pending is not None:
+                self._pending.close()
+            self._pending = _UrllibResp(r["response"])
+        self.size = r["info"]["size"]
+        self.resumable = r["info"]["resumable"]
 
     def _refresh_gate(self):
         """Resuming a file that came through a gate link: the file link it gave
@@ -466,11 +488,12 @@ class Download:
         g = self.gate
         try:
             r = resolve_link(g["url"], g.get("referer", ""), g.get("cookie", ""),
-                             self.user_agent)
+                             self.user_agent, post=g.get("post") or None,
+                             keep_response=True)
         except Exception:
             return                                  # keep the old link and try it
-        if r["info"]["size"] == self.size:
-            self.url, self.referer, self.cookie = r["url"], r["referer"], r["cookie"]
+        if r["info"]["size"] == self.size or r.get("response") is not None:
+            self.use_resolved(g, r)
 
     def _check_mirror(self, m):
         """A mirror is only used if it serves exactly the same size with ranges."""
@@ -533,7 +556,7 @@ class Download:
             os.makedirs(self.folder, exist_ok=True)
             if self.size is None or not self.path:
                 self._probe()
-            elif self.gate:
+            elif self.gate and self._pending is None:
                 self._refresh_gate()
             part = self.path + ".part"
             if not os.path.exists(part) or not self.resumable or not self.segments:
@@ -728,7 +751,9 @@ class Download:
                 seg.pos = 0
                 f.seek(0)
                 f.truncate()
-            resp = link.get(src)
+                resp, self._pending = self._pending, None
+            if resp is None:
+                resp = link.get(src)
         with self._lock:
             self.active_conns += 1
             src["active"] += 1
@@ -845,7 +870,7 @@ class Link:
         return self.conn
 
     def get(self, src, start=None, end=None):
-        if _uses_proxy(src["url"]):
+        if _uses_proxy(src["url"]) or src.get("post"):
             return _UrllibResp(self.dl._open(src, start, end, timeout=SOCKET_TIMEOUT))
         headers = self.dl._headers(src)
         if start is not None:
@@ -1426,6 +1451,11 @@ def gate_target(url):
     return best
 
 
+def _script_name(name):
+    """gate.php, download.aspx … : the name of the script, not of the file."""
+    return bool(re.fullmatch(r"(?i)[\w .()-]+\.(?:php\d?|aspx?|jsp|cgi|pl)", name or ""))
+
+
 def is_gate_url(url):
     """gate.php / go.php / out.php style links, or any .php link that carries
     another link inside it."""
@@ -1560,7 +1590,8 @@ def _next_hop(text, page_url, came_from_url):
     return None
 
 
-def resolve_link(url, referer="", cookie="", user_agent="", max_hops=10):
+def resolve_link(url, referer="", cookie="", user_agent="", max_hops=10,
+                 post=None, keep_response=False):
     """Follow a link until it reaches the actual file. Handles plain HTTP
     redirects (keeping cookies set along the way, which gates often need),
     meta-refresh and JavaScript redirects, the real link packed into a
@@ -1568,11 +1599,16 @@ def resolve_link(url, referer="", cookie="", user_agent="", max_hops=10):
     Download link or button. Returns
     {"url", "referer", "cookie", "info", "via_page"}, where info is
     parse_probe() of the file response. Timers and captchas are not bypassed:
-    those pages raise an error asking you to use the browser."""
-    start = url
+    those pages raise an error asking you to use the browser.
+    `post` = form data (urlencoded text) the browser sent when you clicked a
+    site's Download button; the gate is then asked the same way. If the file
+    comes straight back in answer to that form, keep_response=True returns
+    the open response as "response" (it can't be asked for twice)."""
+    start, start_referer = url, referer
     jar = _Jar(urllib.parse.urlsplit(url).hostname, cookie)
-    method, body = "GET", None
-    seen, hops, via_page, came_from = set(), 0, False, ""
+    method, body = ("POST", post.encode()) if post else ("GET", None)
+    seen, hops, via_page, came_from = set(), 0, bool(post), ""
+    tried_referer = bool(referer)
     while True:
         key = (method, url, body)
         if key in seen or hops > max_hops:
@@ -1605,6 +1641,14 @@ def resolve_link(url, referer="", cookie="", user_agent="", max_hops=10):
                 url = urllib.parse.urljoin(url, loc.strip())
                 hops += 1
                 continue
+            if e.code in (403, 404) and not tried_referer:
+                # many gate.php scripts answer 404/403 unless you come from their site
+                tried_referer = True
+                p0 = urllib.parse.urlsplit(url)
+                referer = f"{p0.scheme}://{p0.netloc}/"
+                seen.discard(key)
+                e.close()
+                continue
             if e.code in (403, 429, 503) and hops and _CAPTCHA.search(
                     e.read(65536).decode("utf-8", "replace")):
                 raise IOError("This site wants a captcha / browser check first. Open the "
@@ -1615,8 +1659,13 @@ def resolve_link(url, referer="", cookie="", user_agent="", max_hops=10):
         info = parse_probe(resp)
         cd = (resp.headers.get("Content-Disposition") or "").lower()
         if not info["html"] or "attachment" in cd:
-            resp.close()
             info["html"] = False
+            if body is not None and keep_response:
+                info["resumable"] = False            # a form answer can't be split
+                return {"url": url, "referer": referer, "cookie": jar.header(host),
+                        "info": info, "via_page": True, "response": resp,
+                        "post": body.decode()}
+            resp.close()
             if body is not None:
                 raise IOError("This site only sends the file in answer to a form, which "
                               "can't be split into parts. Open the link in your browser "
@@ -1626,7 +1675,8 @@ def resolve_link(url, referer="", cookie="", user_agent="", max_hops=10):
                     "info": info,
                     # True when the plain link alone won't work again: it needed a
                     # gate page, or cookies the gate handed out on the way
-                    "via_page": via_page or (url != start and final_cookie != (cookie or ""))}
+                    "via_page": via_page or referer != start_referer
+                                or (url != start and final_cookie != (cookie or ""))}
         raw = resp.read(2 * 1024 * 1024)
         resp.close()
         text = raw.decode(resp.headers.get_content_charset() or "utf-8", errors="replace")
@@ -1741,6 +1791,30 @@ class Manager:
         d.status = "Queued" if start else "Paused"
         with self._lock:
             self.downloads.append(d)
+        self.mark_dirty()
+        return d
+
+    def add_checked(self, job, r):
+        """A browser download the app has already opened (see the listener's
+        "verify"): the site sent the file straight back for a form, so the open
+        answer must be used now — it starts at once, without the Add dialog."""
+        d = Download(self, job["url"], self.settings["download_dir"], job["filename"],
+                     1, job["referer"], job["cookie"], job["user_agent"])
+        g = {"url": job["url"], "referer": job["referer"], "cookie": job["cookie"],
+             "post": job.get("post", "")}
+        d.use_resolved(g, r)
+        name = sanitize(d.filename) if d.filename and \
+            not _script_name(d.filename) else r["info"]["filename"]
+        if _script_name(name):
+            name = "download"
+        os.makedirs(d.folder, exist_ok=True)
+        d.path = unique_path(d.folder, name)
+        d.filename = os.path.basename(d.path)
+        d.note = "Sent by a site's form — downloads on one connection"
+        with self._lock:
+            self.downloads.append(d)
+        d.start()
+        self.notice = f"Downloading “{d.filename}”"
         self.mark_dirty()
         return d
 
@@ -1924,7 +1998,9 @@ class Manager:
             if d.gate:
                 d.url, d.referer, d.cookie = (d.gate["url"], d.gate.get("referer", ""),
                                               d.gate.get("cookie", ""))
+                d.post = d.gate.get("post", "")
                 d.gate = {}
+            d._pending = None
         d.status = "Queued"
         self.mark_dirty()
 
@@ -2029,7 +2105,8 @@ class Manager:
                     return self._reply(400, {"error": "bad request"})
                 job = {
                     "url": url,
-                    "filename": sanitize(req["filename"]) if req.get("filename") else "",
+                    "filename": sanitize(req["filename"]) if req.get("filename")
+                    and not _script_name(str(req["filename"])) else "",
                     "referer": str(req.get("referer", ""))[:2000],
                     "cookie": str(req.get("cookie", ""))[:16000],
                     "user_agent": str(req.get("userAgent", ""))[:500],
@@ -2041,6 +2118,34 @@ class Manager:
                               for x in (req.get("links") or [])[:3000]
                               if isinstance(x, (list, tuple)) and x],
                 }
+                post = req.get("post")
+                job["post"] = post if isinstance(post, str) else ""
+                if req.get("verify") and not job["video"] and not job["series"]:
+                    # The browser has paused its own download and waits for this
+                    # answer: ok -> it cancels its copy; not ok -> it carries on, so
+                    # nothing is lost when a link (e.g. gate.php) can't be re-opened.
+                    try:
+                        r = resolve_link(url, job["referer"], job["cookie"],
+                                         job["user_agent"], post=job["post"] or None,
+                                         keep_response=True)
+                    except Exception as ex:
+                        return self._reply(200, {"ok": False, "error": clean_err(ex)})
+                    if r.get("response") is not None:
+                        try:
+                            mgr.add_checked(job, r)
+                        except Exception as ex:
+                            r["response"].close()
+                            return self._reply(200, {"ok": False, "error": clean_err(ex)})
+                        return self._reply(200, {"ok": True})
+                    job.update(url=r["url"], referer=r["referer"], cookie=r["cookie"],
+                               size=r["info"]["size"])
+                    if r["info"]["resumable"]:
+                        same = mgr.find_same_file(r["info"]["size"], r["url"])
+                        if same:
+                            job["mirror_of"] = same.id
+                    self._reply(200, {"ok": True})
+                    mgr.incoming.put(job)
+                    return
                 self._reply(200, {"ok": True})
                 if not job["video"] and not job["series"] and not is_gate_url(url):
                     # same size as a file already downloading -> offer it as a mirror

@@ -92,6 +92,56 @@ async function sendToApp(job, { launch = true } = {}) {
 // ---------------------------------------------------------------------------
 // 1) catch normal browser downloads
 // ---------------------------------------------------------------------------
+// Download buttons are often forms that send hidden data (file id, token) to a
+// script like gate.php. That link alone gives "404", so remember what each
+// form sent and pass it to the app with the download.
+const posts = new Map();     // url -> { body, ts }
+
+function formBody(rb) {
+  if (!rb) return "";
+  if (rb.formData) {
+    const p = new URLSearchParams();
+    for (const [k, vals] of Object.entries(rb.formData)) for (const v of vals) p.append(k, v);
+    return p.toString();
+  }
+  if (rb.raw && rb.raw.length) {
+    try {
+      return rb.raw.map(r => r.bytes ? new TextDecoder().decode(r.bytes) : "").join("");
+    } catch (e) { return ""; }
+  }
+  return "";
+}
+
+api.webRequest.onBeforeRequest.addListener((d) => {
+  if (d.method !== "POST") return;
+  const body = formBody(d.requestBody);
+  if (!body || body.length > 100000) return;
+  const now = Date.now();
+  for (const [u, p] of posts) if (now - p.ts > 120000) posts.delete(u);
+  posts.set(d.url.split("#")[0], { body, ts: now });
+}, { urls: ["<all_urls>"], types: ["main_frame", "sub_frame", "other", "xmlhttprequest"] },
+   ["requestBody"]);
+
+// Ask the app to take a download, and wait until it has really reached the
+// file. Only then does the browser drop its own copy.
+async function checkWithApp(job) {
+  job.cookie = job.cookie ?? await cookieHeader(job.url);
+  job.userAgent = navigator.userAgent;
+  job.verify = true;
+  try {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 40000);
+    const r = await fetch(APP + "/add", {
+      method: "POST", signal: c.signal,
+      headers: { ...HDR, "Content-Type": "application/json" },
+      body: JSON.stringify(job)
+    });
+    clearTimeout(t);
+    if (!r.ok) return { ok: false };
+    return await r.json();
+  } catch (e) { return { ok: false }; }
+}
+
 api.downloads.onCreated.addListener(async (item) => {
   const { capture = true } = await api.storage.local.get("capture");
   if (!capture) return;
@@ -101,12 +151,24 @@ api.downloads.onCreated.addListener(async (item) => {
   // If the app is closed, start it (fast); if that doesn't work in time,
   // let the browser keep the download.
   if (!(await appAlive()) && !(await launchApp())) return;
-  try {
-    await api.downloads.cancel(item.id);
-    await api.downloads.erase({ id: item.id });
-  } catch (e) { /* already finished */ }
+  const form = posts.get(url.split("#")[0]) || posts.get((item.url || "").split("#")[0]);
+  // Hold the browser's download while the app checks the link.
+  let paused = false;
+  try { await api.downloads.pause(item.id); paused = true; } catch (e) { /* already done */ }
   const filename = (item.filename || "").split(/[\\/]/).pop();
-  sendToApp({ url, referer: item.referrer || "", filename, video: false }, { launch: false });
+  const res = await checkWithApp({ url, referer: item.referrer || "", filename, video: false,
+                                   post: form ? form.body : "" });
+  if (res && res.ok) {
+    try {
+      await api.downloads.cancel(item.id);
+      await api.downloads.erase({ id: item.id });
+    } catch (e) { /* already finished */ }
+    flash("✓", "#2e7d32");
+  } else {
+    // The app couldn't get it (for example a one-time link): the browser keeps it.
+    if (paused) { try { await api.downloads.resume(item.id); } catch (e) {} }
+    flash("↓", "#f9a825");
+  }
 });
 
 // ---------------------------------------------------------------------------
