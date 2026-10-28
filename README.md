@@ -68,7 +68,12 @@ The extension popup has switches for catching downloads, the video button, and s
 - **Protected streams** (Netflix, Disney+, Spotify) can't be downloaded. Private Facebook videos work only when sent from the browser, which passes along your login cookies.
 - **YouTube changes often.** If video downloads break, re-run the build (re-run the Action, or `build.bat`) to get the newest yt-dlp.
 - **Mirrors must be the identical file.** A mirror is used only if its size matches exactly; anything else is skipped and the reason is shown.
-- **Video quality:** *best* gives up to 1080p in H.264 with AAC audio, which plays everywhere. *max* gives 4K/8K, but YouTube only offers those in VP9/AV1, so you may need VLC or the free AV1/VP9 extensions from the Microsoft Store. Any file that still ends up with Opus audio is converted to AAC automatically.
+- **Video quality:**
+  - *best* gives up to 1080p in H.264 with AAC audio, which plays everywhere.
+  - *1440p*, *4K* and *8K* (and *max*, the highest available) use VP9/AV1, because that's all YouTube offers above 1080p. 8K on YouTube is AV1 only.
+  - To play these, use VLC or install the free *AV1 Video Extension* from the Microsoft Store. Smooth 8K playback needs a graphics card or CPU with AV1 hardware decoding (roughly 2021 or newer).
+  - 8K files are large: about 200–400 MB per minute.
+  - Any file that still ends up with Opus audio is converted to AAC automatically.
 - **The video button can't work inside full-screen players.** Leave full screen to use it.
 - **Not supported:** torrents, macOS.
 - **Windows warning:** the `.exe` isn't code-signed, so SmartScreen may warn the first time. Click *More info → Run anyway*.

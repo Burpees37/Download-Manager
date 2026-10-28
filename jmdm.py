@@ -37,7 +37,7 @@ import http.server
 import http.client
 
 APP_NAME = "JM Download Manager"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 CHUNK = 64 * 1024
@@ -989,7 +989,8 @@ class VideoDownload(Download):
             return
         ffmpeg = find_ffmpeg()
         q = self.quality
-        height = {"best": 1080, "1080p": 1080, "720p": 720, "480p": 480}.get(q)
+        height = {"best": 1080, "1080p": 1080, "720p": 720, "480p": 480,
+                  "8K": 4320, "4K": 2160, "1440p": 1440}.get(q)
         if q == "audio":
             fmt = "ba[ext=m4a]/ba/b"
         elif ffmpeg:
@@ -999,8 +1000,9 @@ class VideoDownload(Download):
             # "max" takes the highest resolution (4K/8K are VP9/AV1 only) but
             # still uses AAC audio.
             h = f"[height<={height}]" if height else ""
-            if q == "max":
-                fmt = "bv*+ba[ext=m4a]/bv*+ba/b"
+            if q in ("max", "8K", "4K", "1440p"):
+                # Above 1080p YouTube only has VP9/AV1 video (8K is AV1).
+                fmt = f"bv*{h}+ba[ext=m4a]/bv*{h}+ba/b{h}/b"
             else:
                 fmt = (f"bv*{h}[vcodec^=avc1]+ba[ext=m4a]/bv*{h}+ba[ext=m4a]/"
                        f"bv*{h}+ba/b{h}/b")
@@ -1712,7 +1714,8 @@ def run_gui(initial_url=None):
                         variable=vid_v).pack(side="left")
         ttk.Label(vrow, text="   Quality:").pack(side="left")
         ttk.Combobox(vrow, textvariable=q_v, state="readonly", width=8,
-                     values=("best", "max", "1080p", "720p", "480p", "audio")).pack(side="left")
+                     values=("best", "max", "8K", "4K", "1440p", "1080p", "720p",
+                             "480p", "audio")).pack(side="left")
         r += 1
         prow = ttk.Frame(frm)
         prow.grid(row=r, column=0, columnspan=3, sticky="w", pady=3)
@@ -1824,7 +1827,8 @@ def run_gui(initial_url=None):
                                                           increment=100,
                                                           textvariable=lim_v, width=10)),
             ("Default video quality:", ttk.Combobox(frm, textvariable=q_v, state="readonly",
-                                                    values=("best", "max", "1080p", "720p",
+                                                    values=("best", "max", "8K", "4K",
+                                                            "1440p", "1080p", "720p",
                                                             "480p", "audio"), width=8)),
         ]
         for i, (label, widget) in enumerate(rows):
