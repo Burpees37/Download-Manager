@@ -86,3 +86,14 @@ The extension popup has switches for catching downloads, the video button, and s
 ```
 
 Settings and the download list are stored in `jmdm_data` next to the app.
+
+## Extra tool: page_media_grabber.py
+`tools/page_media_grabber.py` is a standalone script for your own media server. It scans a page's HTML for `<video>`/`<source>` tags and `.m3u8`/`.mpd` links, then downloads what it finds one by one into a folder.
+
+```
+pip install requests beautifulsoup4
+python tools/page_media_grabber.py https://myserver.local/show/ --list
+python tools/page_media_grabber.py --from-file pages.txt -o D:\Videos\Show --numbered --ignore-robots
+```
+
+Pages that build their player with JavaScript won't show anything to it. Use the browser extension's video button for those.
