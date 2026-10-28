@@ -1,15 +1,60 @@
 {
   "manifest_version": 3,
   "name": "JM Download Manager",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "description": "Sends downloads and videos to the JM Download Manager app for fast multi-connection downloading.",
-  "permissions": ["downloads", "contextMenus", "cookies", "storage"],
-  "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "background.js" },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjslD3tKpCvTBVtQFziBv2K7JNn+jRM5CTrQdUsalAA4UXQ2Kw1WBYnValEv5vnr/juFvuvR7CId0u6RSSj1BD5+MOtU/cyCL3ocMPJDyZzQEG/d40w9RC+tqQKUvg5uhPBE19GEsyV8Zg+ZO1c8vx1/zEc6ZesL/RogDfmjVouwtCfDd0u6dh7bb4fkb7lPNPfK9puzuZAOoM54mFz7oBTBQW1cmru/fQoELd4N0XTCj9uc033y+Ep2VIEFiJRjjGa4+8fz39fEge9k4fzQoQExkuC0Kw9vUHhqGWDdMp3RBw4VSJZcKZGPywGBsD56qJK0exFUj6bTxO2uaFUArtwIDAQAB",
+  "permissions": [
+    "downloads",
+    "contextMenus",
+    "cookies",
+    "storage",
+    "webRequest",
+    "nativeMessaging",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "JM Download Manager",
-    "default_icon": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" }
+    "default_icon": {
+      "16": "icons/16.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
   },
-  "icons": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" }
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "jmdm@jmbuilds",
+      "strict_min_version": "121.0"
+    }
+  }
 }

@@ -37,7 +37,7 @@ import http.server
 import http.client
 
 APP_NAME = "JM Download Manager"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 CHUNK = 64 * 1024
@@ -47,6 +47,9 @@ MAX_TOTAL_CONNECTIONS = 96      # across all mirrors of one file
 STALL_SECONDS = 5               # no data this long = reconnect
 SOCKET_TIMEOUT = 30
 LISTEN_PORT = 8721
+NATIVE_HOST = "com.jmbuilds.jmdm"
+CHROME_EXTENSION_ID = "lmaohoejkhjffbfcngbcjhidlcefefdi"     # fixed by the "key" in extension/manifest.json
+FIREFOX_EXTENSION_ID = "jmdm@jmbuilds"
 
 VIDEO_SITES = ("youtube.com", "youtu.be", "facebook.com", "fb.watch", "fb.com",
                "tiktok.com", "instagram.com", "twitter.com", "x.com",
@@ -179,6 +182,50 @@ def have_ytdlp():
         return True
     except Exception:
         return False
+
+
+def register_browser_integration():
+    """Register the native messaging helper with Chrome, Edge, Brave and
+    Firefox (current user only, no admin needed) so the extension can start
+    the app. Safe to run on every launch; it also fixes paths if the app moved."""
+    if os.name != "nt":
+        return False, "Only needed on Windows"
+    import winreg
+    data = os.path.join(app_dir(), "jmdm_data")
+    os.makedirs(data, exist_ok=True)
+    if getattr(sys, "frozen", False):
+        host = os.path.join(app_dir(), "jmdm-host.exe")
+        if not os.path.isfile(host):
+            return False, "jmdm-host.exe is missing next to the app"
+    else:
+        host = os.path.join(data, "jmdm-host.bat")
+        py = sys.executable
+        if py.lower().endswith("pythonw.exe"):
+            py = py[:-11] + "python.exe"
+        with open(host, "w", encoding="utf-8") as fh:
+            fh.write(f'@echo off\n"{py}" "{os.path.join(app_dir(), "native_host.py")}" %*\n')
+    base = {"name": NATIVE_HOST, "description": "Starts JM Download Manager",
+            "path": host, "type": "stdio"}
+    chrome_json = os.path.join(data, "native_host_chrome.json")
+    firefox_json = os.path.join(data, "native_host_firefox.json")
+    with open(chrome_json, "w", encoding="utf-8") as fh:
+        json.dump(dict(base, allowed_origins=[f"chrome-extension://{CHROME_EXTENSION_ID}/"]),
+                  fh, indent=2)
+    with open(firefox_json, "w", encoding="utf-8") as fh:
+        json.dump(dict(base, allowed_extensions=[FIREFOX_EXTENSION_ID]), fh, indent=2)
+    keys = [(r"Software\Google\Chrome\NativeMessagingHosts", chrome_json),
+            (r"Software\Microsoft\Edge\NativeMessagingHosts", chrome_json),
+            (r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts", chrome_json),
+            (r"Software\Mozilla\NativeMessagingHosts", firefox_json)]
+    done = 0
+    for key, path in keys:
+        try:
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key + "\\" + NATIVE_HOST) as k:
+                winreg.SetValueEx(k, "", 0, winreg.REG_SZ, path)
+            done += 1
+        except OSError:
+            pass
+    return done > 0, f"Registered with {done} browser profile location(s)"
 
 
 class RateLimiter:
@@ -907,11 +954,15 @@ class VideoDownload(Download):
         super().__init__(*a, **kw)
         self.quality = quality
         self.name_prefix = name_prefix      # "007 - " for playlist items
+        # a name chosen by the user, or the page title for streams caught on
+        # sites yt-dlp doesn't know (otherwise they'd be called "index.mp4")
+        self.custom_name = os.path.splitext(sanitize(self.filename))[0] if self.filename else ""
 
     def to_dict(self):
         d = super().to_dict()
         d["quality"] = self.quality
         d["name_prefix"] = self.name_prefix
+        d["custom_name"] = self.custom_name
         return d
 
     @classmethod
@@ -919,6 +970,7 @@ class VideoDownload(Download):
         obj = super().from_dict(manager, d)
         obj.quality = d.get("quality", "best")
         obj.name_prefix = d.get("name_prefix", "")
+        obj.custom_name = d.get("custom_name", "")
         return obj
 
     def add_mirror(self, *a, **kw):
@@ -937,12 +989,21 @@ class VideoDownload(Download):
             return
         ffmpeg = find_ffmpeg()
         q = self.quality
-        height = {"1080p": 1080, "720p": 720, "480p": 480}.get(q)
+        height = {"best": 1080, "1080p": 1080, "720p": 720, "480p": 480}.get(q)
         if q == "audio":
             fmt = "ba[ext=m4a]/ba/b"
         elif ffmpeg:
-            fmt = (f"bv*[height<={height}]+ba/b[height<={height}]/b" if height
-                   else "bv*+ba/b")
+            # Prefer H.264 video + AAC (m4a) audio: plays in every Windows player.
+            # YouTube's top picks are VP9/AV1 + Opus, and Opus inside .mp4 is the
+            # "audio not supported" error in Movies & TV / Windows Media Player.
+            # "max" takes the highest resolution (4K/8K are VP9/AV1 only) but
+            # still uses AAC audio.
+            h = f"[height<={height}]" if height else ""
+            if q == "max":
+                fmt = "bv*+ba[ext=m4a]/bv*+ba/b"
+            else:
+                fmt = (f"bv*{h}[vcodec^=avc1]+ba[ext=m4a]/bv*{h}+ba[ext=m4a]/"
+                       f"bv*{h}+ba/b{h}/b")
         else:
             # without ffmpeg we can only take files that already have sound
             fmt = (f"b[height<={height}][ext=mp4]/b[height<={height}]/b" if height
@@ -987,7 +1048,8 @@ class VideoDownload(Download):
         self._eta = None
         opts = {
             "outtmpl": os.path.join(self.folder, self.name_prefix.replace("%", "%%")
-                                   + "%(title).150B [%(id)s].%(ext)s"),
+                                   + (self.custom_name.replace("%", "%%") if self.custom_name
+                                      else "%(title).150B [%(id)s]") + ".%(ext)s"),
             "format": fmt,
             "concurrent_fragment_downloads": self.connections,
             "http_chunk_size": 10 * 1024 * 1024,
@@ -1016,6 +1078,8 @@ class VideoDownload(Download):
                 if info and not self.path:
                     self.path = ydl.prepare_filename(info)
                     self.filename = os.path.basename(self.path)
+            if ffmpeg and self.path and os.path.isfile(self.path):
+                self._make_playable(ffmpeg)
             if self.size is None or self.size < 0:
                 self.size = self.downloaded
             self.downloaded = self.size
@@ -1035,6 +1099,34 @@ class VideoDownload(Download):
 
     def update_speed(self):
         super().update_speed()
+
+    def _make_playable(self, ffmpeg):
+        """Safety net: if the saved .mp4 still has Opus/Vorbis audio (some sites
+        offer nothing else), convert just the audio to AAC so Windows players
+        can play it. The video is copied untouched, so this takes seconds."""
+        import subprocess
+        if not self.path.lower().endswith((".mp4", ".m4v", ".mov")):
+            return
+        flags = 0x08000000 if os.name == "nt" else 0      # no console window
+        try:
+            probe = subprocess.run([ffmpeg, "-hide_banner", "-i", self.path],
+                                   capture_output=True, text=True, errors="replace",
+                                   creationflags=flags, timeout=60)
+            codecs = re.findall(r"Audio: (\w+)", probe.stderr)
+            if not codecs or not any(c in ("opus", "vorbis") for c in codecs):
+                return
+            self.status = "Processing"
+            tmp = self.path + ".aac.mp4"
+            r = subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                                "-i", self.path, "-map", "0", "-c", "copy",
+                                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+                                tmp], capture_output=True, creationflags=flags, timeout=3600)
+            if r.returncode == 0 and os.path.getsize(tmp) > 0:
+                os.replace(tmp, self.path)
+            elif os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
 
 
 # --------------------------------------------------------------------------
@@ -1344,6 +1436,7 @@ class Manager:
                     "user_agent": str(req.get("userAgent", ""))[:500],
                     "video": bool(req.get("video")) or is_video_url(url),
                     "mirror_of": None, "size": None,
+                    "title": str(req.get("title", ""))[:150],
                 }
                 self._reply(200, {"ok": True})
                 if not job["video"]:
@@ -1385,6 +1478,16 @@ def run_gui(initial_url=None):
 
     mgr = Manager()
     listening = mgr.start_listener()
+    integration = {"ok": False, "msg": "checking…"}
+
+    def _register():
+        try:
+            ok, msg = register_browser_integration()
+        except Exception as e:
+            ok, msg = False, clean_err(e)
+        integration.update(ok=ok, msg=msg)
+
+    threading.Thread(target=_register, daemon=True).start()
 
     root = tk.Tk()
     root.title(f"{APP_NAME} {VERSION}")
@@ -1609,7 +1712,7 @@ def run_gui(initial_url=None):
                         variable=vid_v).pack(side="left")
         ttk.Label(vrow, text="   Quality:").pack(side="left")
         ttk.Combobox(vrow, textvariable=q_v, state="readonly", width=8,
-                     values=("best", "1080p", "720p", "480p", "audio")).pack(side="left")
+                     values=("best", "max", "1080p", "720p", "480p", "audio")).pack(side="left")
         r += 1
         prow = ttk.Frame(frm)
         prow.grid(row=r, column=0, columnspan=3, sticky="w", pady=3)
@@ -1721,7 +1824,7 @@ def run_gui(initial_url=None):
                                                           increment=100,
                                                           textvariable=lim_v, width=10)),
             ("Default video quality:", ttk.Combobox(frm, textvariable=q_v, state="readonly",
-                                                    values=("best", "1080p", "720p",
+                                                    values=("best", "max", "1080p", "720p",
                                                             "480p", "audio"), width=8)),
         ]
         for i, (label, widget) in enumerate(rows):
@@ -1738,6 +1841,7 @@ def run_gui(initial_url=None):
                         variable=ask_v).grid(row=n + 1, column=0, columnspan=3, sticky="w")
         ff = find_ffmpeg()
         notes = [f"Browser extension: {'listening on port ' + str(s['listen_port']) if listening else 'port busy — is another copy running?'}",
+                 f"Browser can start the app: {'yes — ' if integration['ok'] else 'no — '}{integration['msg']}",
                  f"yt-dlp (video sites): {'installed' if have_ytdlp() else 'NOT installed'}",
                  f"ffmpeg (HD video + audio merge): {ff or 'not found — put ffmpeg.exe next to the app'}"]
         ttk.Label(frm, text="\n".join(notes), foreground="#555",
@@ -1781,7 +1885,7 @@ def run_gui(initial_url=None):
         if d.status == "Error":
             return "Error: " + d.error
         if d.status == "Processing":
-            return "Merging video + audio…"
+            return "Merging / converting…"
         if d.status == "Downloading" and d.kind == "file" and d.size is not None \
                 and not d.resumable:
             return "Downloading (server allows 1 connection)"
@@ -1829,6 +1933,9 @@ def run_gui(initial_url=None):
                                req["user_agent"])
                 tree_select[0] = same.id
                 continue
+            if req["video"] and not req["filename"] and req.get("title") \
+                    and not is_video_url(req["url"]):
+                req["filename"] = sanitize(req["title"])   # stream from a generic site
             if mgr.settings.get("ask_before_start", True):
                 add_dialog(req["url"], req["filename"], req["referer"], req["cookie"],
                            req["user_agent"], req["video"], from_browser=True)

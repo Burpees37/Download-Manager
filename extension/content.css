@@ -1,0 +1,2 @@
+/* The button lives in a shadow root; this only keeps its host box out of page layouts. */
+#jmdm-video-button { margin: 0; padding: 0; border: 0; width: auto; height: auto; }

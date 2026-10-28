@@ -3,22 +3,31 @@
 <head>
 <meta charset="utf-8">
 <style>
-  body { font: 13px "Segoe UI", system-ui, sans-serif; width: 270px; margin: 0; padding: 14px; color: #222; }
+  body { font: 13px "Segoe UI", system-ui, sans-serif; width: 290px; margin: 0; padding: 14px; color: #222; }
   h1 { font-size: 14px; margin: 0 0 10px; }
-  .row { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; }
+  .row { display: flex; align-items: center; justify-content: space-between; margin: 7px 0; }
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; background: #aaa; }
   .on { background: #2e7d32; } .off { background: #c62828; }
   button { width: 100%; padding: 9px; margin-top: 8px; border: 0; border-radius: 6px;
            background: #2b7de9; color: #fff; font-weight: 600; cursor: pointer; }
+  button.ghost { background: #eef3fb; color: #1d5fbf; }
   button:disabled { background: #9bbbe8; cursor: default; }
+  #list div { padding: 7px 9px; margin-top: 4px; border-radius: 6px; background: #f3f6fb; cursor: pointer; }
+  #list div:hover { background: #e2ebfa; }
   p { color: #666; font-size: 12px; margin: 10px 0 0; }
+  hr { border: 0; border-top: 1px solid #e5e5e5; margin: 10px 0; }
 </style>
 </head>
 <body>
   <h1>JM Download Manager</h1>
   <div class="row"><span><span id="dot" class="dot"></span><span id="state">Checking app…</span></span></div>
+  <button id="start" class="ghost" hidden>Start the app</button>
+  <hr>
   <div class="row"><label for="cap">Catch browser downloads</label><input type="checkbox" id="cap"></div>
+  <div class="row"><label for="btn">Show button on videos</label><input type="checkbox" id="btn"></div>
+  <div class="row"><label for="auto">Start the app when needed</label><input type="checkbox" id="auto"></div>
   <button id="vid">Download video on this tab</button>
+  <div id="list"></div>
   <p id="msg">Right-click any link → “Download with JM Download Manager”.</p>
   <script src="popup.js"></script>
 </body>

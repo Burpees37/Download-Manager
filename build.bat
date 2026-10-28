@@ -5,10 +5,12 @@ echo Installing build tools...
 python -m pip install --upgrade pyinstaller yt-dlp || goto :nopython
 python -m PyInstaller --noconfirm --onefile --windowed --name "JM Download Manager" ^
   --icon jmdm.ico --collect-submodules yt_dlp jmdm.py || goto :fail
+python -m PyInstaller --noconfirm --onefile --windowed --name jmdm-host native_host.py || goto :fail
 set DEST=D:\JM-Download-Manager
 if not exist D:\ set DEST=%USERPROFILE%\JM-Download-Manager
 if not exist "%DEST%" mkdir "%DEST%"
 copy /y "dist\JM Download Manager.exe" "%DEST%\" >nul
+copy /y "dist\jmdm-host.exe" "%DEST%\" >nul
 xcopy /e /i /y extension "%DEST%\extension" >nul
 echo.
 echo Done! App installed to %DEST%

@@ -28,6 +28,11 @@ jobs:
           --name "JM Download Manager" --icon jmdm.ico
           --collect-submodules yt_dlp jmdm.py
 
+      - name: Build browser helper (lets the extension start the app)
+        run: >
+          python -m PyInstaller --noconfirm --onefile --windowed
+          --name jmdm-host native_host.py
+
       - name: Add ffmpeg (for HD video)
         shell: pwsh
         run: |
@@ -39,7 +44,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory pkg | Out-Null
-          Copy-Item "dist\JM Download Manager.exe", dist\ffmpeg.exe, README.md pkg\
+          Copy-Item "dist\JM Download Manager.exe", dist\jmdm-host.exe, dist\ffmpeg.exe, README.md pkg\
           Copy-Item extension pkg\extension -Recurse
           Compress-Archive pkg\* JM-Download-Manager-Windows.zip
 
