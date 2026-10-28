@@ -35,9 +35,10 @@ import urllib.parse
 import urllib.error
 import http.server
 import http.client
+import html.parser
 
 APP_NAME = "JM Download Manager"
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 CHUNK = 64 * 1024
@@ -97,6 +98,7 @@ def human_time(sec):
 
 
 def sanitize(name):
+    name = re.sub(r"\s*:\s+", " - ", name)            # "Show: Season 1" -> "Show - Season 1"
     name = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", name).strip(" .")
     return name[:200] or "download"
 
@@ -434,7 +436,7 @@ class Download:
         resp = self._open(self._main_source(), 0, None)
         try:
             info = parse_probe(resp)
-            if info["html"] and not self.filename:
+            if info["html"]:
                 raise IOError("This link opens a web page, not a file. Open it in your "
                               "browser and click Download there — the extension will "
                               "catch the real file.")
@@ -956,7 +958,10 @@ class VideoDownload(Download):
         self.name_prefix = name_prefix      # "007 - " for playlist items
         # a name chosen by the user, or the page title for streams caught on
         # sites yt-dlp doesn't know (otherwise they'd be called "index.mp4")
-        self.custom_name = os.path.splitext(sanitize(self.filename))[0] if self.filename else ""
+        name = sanitize(self.filename) if self.filename else ""
+        if re.search(r"\.(mp4|mkv|webm|m4v|mov|m4a|mp3)$", name, re.I):
+            name = name.rsplit(".", 1)[0]
+        self.custom_name = name
 
     def to_dict(self):
         d = super().to_dict()
@@ -1132,6 +1137,183 @@ class VideoDownload(Download):
 
 
 # --------------------------------------------------------------------------
+# series pages: "cover + episode 1 2 3 …" -> whole season
+# --------------------------------------------------------------------------
+class _PageScan(html.parser.HTMLParser):
+    """Collects what a series or episode page contains, using only the
+    standard library (no extra packages in the .exe)."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links = []          # [href, text, attrs]
+        self.media = []          # (url, where)
+        self.iframes = []
+        self.images = []         # (src, attrs)
+        self.meta = {}
+        self.title = ""
+        self.h1 = ""
+        self._a = None
+        self._in = None
+
+    def handle_starttag(self, tag, attrs):
+        a = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "a" and a.get("href"):
+            self._a = [a["href"], "", a]
+            self.links.append(self._a)
+        elif tag in ("video", "audio", "source"):
+            for k in ("src", "data-src"):
+                if a.get(k):
+                    self.media.append((a[k], f"<{tag}>"))
+        elif tag == "iframe" and (a.get("src") or a.get("data-src")):
+            self.iframes.append(a.get("src") or a.get("data-src"))
+        elif tag == "img" and (a.get("src") or a.get("data-src")):
+            self.images.append((a.get("data-src") or a["src"], a))
+        elif tag == "meta":
+            key = (a.get("property") or a.get("name") or "").lower()
+            if key and a.get("content"):
+                self.meta.setdefault(key, a["content"])
+        elif tag in ("title", "h1"):
+            self._in = tag
+
+    def handle_endtag(self, tag):
+        if tag == "a":
+            self._a = None
+        if tag == self._in:
+            self._in = None
+
+    def handle_data(self, data):
+        if self._a is not None:
+            self._a[1] += data
+        if self._in == "title":
+            self.title += data
+        elif self._in == "h1" and len(self.h1) < 200:
+            self.h1 += data
+
+
+_EP_TEXT = re.compile(r"^\s*(?:ep(?:isode)?\.?\s*|e|#)?\s*0*(\d{1,4})\s*$", re.I)
+_EP_URL = re.compile(r"(?:[?&](?:ep|episode|e|eps|epi)=|(?:episode|ep)[-_/]?)0*(\d{1,4})(?:\D|$)",
+                     re.I)
+_STREAM_IN_TEXT = re.compile(r"""(?:https?:)?//[^\s"'<>\\]+?\.(?:m3u8|mpd|mp4|webm|mkv)"""
+                             r"""(?:\?[^\s"'<>\\]*)?"""
+                             r"""|(?<=["'])/[^\s"'<>\\]+?\.(?:m3u8|mpd|mp4|webm|mkv)"""
+                             r"""(?:\?[^\s"'<>\\]*)?""", re.I)
+
+
+def fetch_html(url, referer="", cookie="", user_agent="", timeout=30):
+    h = {"User-Agent": user_agent or UA, "Accept": "text/html,*/*"}
+    if referer:
+        h["Referer"] = referer
+    if cookie:
+        h["Cookie"] = cookie
+    with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout) as r:
+        raw = r.read(8 * 1024 * 1024)
+        charset = r.headers.get_content_charset() or "utf-8"
+        return raw.decode(charset, errors="replace"), r.geturl()
+
+
+def scan_page(html_text):
+    p = _PageScan()
+    try:
+        p.feed(html_text)
+    except Exception:
+        pass
+    return p
+
+
+def series_title(p):
+    for t in (p.meta.get("og:title"), p.h1, p.title):
+        t = re.sub(r"\s+", " ", (t or "")).strip()
+        if t:
+            # drop " - Watch online", " | MySite" style tails
+            return sanitize(re.split(r"\s+[|–—-]\s+", t)[0]) or sanitize(t)
+    return "Series"
+
+
+def find_cover(p, base):
+    if p.meta.get("og:image"):
+        return urllib.parse.urljoin(base, p.meta["og:image"])
+    for src, a in p.images:
+        hint = " ".join((a.get("class", ""), a.get("id", ""), a.get("alt", ""), src)).lower()
+        if any(w in hint for w in ("cover", "poster", "thumb", "banner")):
+            return urllib.parse.urljoin(base, src)
+    return None
+
+
+def find_episodes(links, base):
+    """Numbered episode links -> sorted [(number, url)].
+    Matches link text like "1", "02", "Ep 3", "Episode 4", "E5", or URLs like
+    watch.php?ep=6, /episode-7, ?episode=8 on the same site."""
+    host = urllib.parse.urlsplit(base).hostname
+    page = base.split("#")[0]
+    groups = {}                        # URL pattern -> {number: url}
+    hinted = set()                     # patterns whose links say "ep"/"episode"
+    for href, text, attrs in links:
+        url = urllib.parse.urljoin(base, href.strip()).split("#")[0]
+        if not url.startswith(("http://", "https://")) or url == page:
+            continue
+        if urllib.parse.urlsplit(url).hostname != host:
+            continue
+        text = re.sub(r"\s+", " ", text or attrs.get("title", "")).strip()
+        n = None
+        m = _EP_TEXT.match(text)
+        if m:
+            n = int(m.group(1))
+        else:
+            m = _EP_URL.search(url)
+            if m and (not text or re.search(r"\d|ep", text, re.I)):
+                n = int(m.group(1))
+        if n is None:
+            continue
+        pattern = re.sub(r"\d+", "#", url)
+        groups.setdefault(pattern, {}).setdefault(n, url)
+        if re.search(r"\bep|episode|^e\d", text, re.I) or _EP_URL.search(url):
+            hinted.add(pattern)
+    # Episode links share one URL pattern (watch.php?ep=1, ?ep=2 …). Pick the
+    # most episode-like group, so stray numbered links such as a "2024" year
+    # tag or comment pages "2", "3" never become episodes.
+    good = [(p, g) for p, g in groups.items() if len(g) >= 3 or (p in hinted and len(g) >= 2)]
+    if not good:
+        return []
+    pattern, best = max(good, key=lambda pg: (pg[0] in hinted, len(pg[1]), -min(pg[1])))
+    return sorted(best.items())
+
+
+def parse_items(spec, available):
+    """'1-6,9' -> {1,2,3,4,5,6,9}; empty -> all."""
+    if not spec.strip():
+        return set(available)
+    out = set()
+    for part in spec.split(","):
+        a, _, b = part.strip().partition("-")
+        if a.strip().isdigit():
+            out.update(range(int(a), int((b or a).strip() or a) + 1))
+    return out
+
+
+def find_episode_media(html_text, base, scan=None):
+    """Best guess at the video on an episode page.
+    Returns (url, kind) with kind "file", "stream" or "page" (yt-dlp)."""
+    p = scan or scan_page(html_text)
+    cands = [urllib.parse.urljoin(base, u) for u, _ in p.media]
+    cands += [urllib.parse.urljoin(base, m.group(0)) for m in _STREAM_IN_TEXT.finditer(html_text)]
+    for key in ("og:video", "og:video:url", "og:video:secure_url"):
+        if p.meta.get(key):
+            cands.append(urllib.parse.urljoin(base, p.meta[key]))
+    cands = [c for c in cands if c.startswith(("http://", "https://"))]
+    for c in cands:                                   # direct files first: fastest
+        if re.search(r"\.(mp4|webm|mkv|m4v|mov)(\?|$)", c, re.I):
+            return c, "file"
+    for c in cands:
+        if re.search(r"\.(m3u8|mpd)(\?|$)", c, re.I):
+            return c, "stream"
+    for f in p.iframes:                               # embedded player
+        u = urllib.parse.urljoin(base, f)
+        if u.startswith(("http://", "https://")):
+            return u, "page"
+    return None, None
+
+
+# --------------------------------------------------------------------------
 # manager: queue, persistence, browser listener
 # --------------------------------------------------------------------------
 class Manager:
@@ -1292,6 +1474,85 @@ class Manager:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def add_series(self, url, folder=None, connections=None, quality=None,
+                   referer="", cookie="", user_agent="", items="", start=True,
+                   links=None, done=None):
+        """Whole season from a series page: find the numbered episode links,
+        open each episode, find its video and queue them all, in order, into
+        one folder named after the series (with its cover).
+        `links` = [[href, text], ...] already read from the rendered page by
+        the browser extension (works when the list is built by JavaScript)."""
+        folder = folder or self.settings["download_dir"]
+        self.notice = "Reading episode list…"
+
+        def work():
+            count, title, err = 0, "", ""
+            try:
+                page_html, base = fetch_html(url, referer, cookie, user_agent)
+                p = scan_page(page_html)
+                title = series_title(p)
+                all_links = list(p.links)
+                for item in links or []:
+                    if isinstance(item, (list, tuple)) and item:
+                        all_links.append([str(item[0]), str(item[1]) if len(item) > 1 else "", {}])
+                eps = find_episodes(all_links, base)
+                if not eps:
+                    raise IOError("No numbered episode links found on this page. If the "
+                                  "episode list only appears in the browser, right-click "
+                                  "the page → “Download all episodes on this page”")
+                wanted = parse_items(items, [n for n, _ in eps])
+                eps = [(n, u) for n, u in eps if n in wanted]
+                width = max(2, len(str(eps[-1][0]))) if eps else 2
+                sub = os.path.join(folder, title)
+                os.makedirs(sub, exist_ok=True)
+                cover = find_cover(p, base)
+                if cover:
+                    try:
+                        req = urllib.request.Request(cover, headers={
+                            "User-Agent": user_agent or UA, "Referer": base})
+                        with urllib.request.urlopen(req, timeout=20) as r:
+                            data = r.read(10 * 1024 * 1024)
+                        ext = os.path.splitext(urllib.parse.urlsplit(cover).path)[1].lower()
+                        ext = ext if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif") else ".jpg"
+                        with open(os.path.join(sub, "cover" + ext), "wb") as fh:
+                            fh.write(data)
+                    except Exception:
+                        pass
+                skipped = []
+                for i, (n, ep_url) in enumerate(eps, 1):
+                    self.notice = f"Reading episode {n} ({i}/{len(eps)}) of “{title}”…"
+                    name = f"{title} - E{n:0{width}d}"
+                    try:
+                        ep_html, ep_base = fetch_html(ep_url, base, cookie, user_agent)
+                        media, kind = find_episode_media(ep_html, ep_base)
+                    except Exception:
+                        media, kind = None, None
+                    if media is None:
+                        # nothing in the HTML: let yt-dlp try the episode page itself
+                        media, kind = ep_url, "page"
+                    if kind == "file":
+                        ext = os.path.splitext(urllib.parse.urlsplit(media).path)[1] or ".mp4"
+                        self.add(media, sub, name + ext, connections, ep_url, cookie,
+                                 user_agent, video=False, start=start)
+                    else:
+                        if not have_ytdlp():
+                            skipped.append(n)
+                            continue
+                        self.add(media, sub, name, connections, ep_url, cookie, user_agent,
+                                 video=True, quality=quality, start=start)
+                    count += 1
+                    time.sleep(0.2)                  # be gentle with the server
+                self.notice = (f"Added {count} episodes of “{title}”"
+                               + (f" (skipped {len(skipped)}: video tool missing)"
+                                  if skipped else ""))
+            except Exception as ex:
+                err = clean_err(ex)
+                self.notice = "Season error: " + err
+            if done:
+                done(count, title, err)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def find_same_file(self, size, exclude_url=""):
         """An unfinished download with exactly this size (likely the same file
         from another host) — used to offer it as a mirror."""
@@ -1439,9 +1700,13 @@ class Manager:
                     "video": bool(req.get("video")) or is_video_url(url),
                     "mirror_of": None, "size": None,
                     "title": str(req.get("title", ""))[:150],
+                    "series": bool(req.get("series")),
+                    "links": [[str(x[0])[:2000], str(x[1])[:100]]
+                              for x in (req.get("links") or [])[:3000]
+                              if isinstance(x, (list, tuple)) and x],
                 }
                 self._reply(200, {"ok": True})
-                if not job["video"]:
+                if not job["video"] and not job["series"]:
                     # same size as a file already downloading -> offer it as a mirror
                     try:
                         info = probe_info(url, job["referer"], job["cookie"],
@@ -1652,7 +1917,7 @@ def run_gui(initial_url=None):
             mgr.add_mirror(d, u.strip(), user_agent=d.user_agent)
 
     def add_dialog(url="", filename="", referer="", cookie="", user_agent="",
-                   video=None, from_browser=False):
+                   video=None, from_browser=False, season=False, series_links=None):
         win = tk.Toplevel(root)
         win.title("Add download")
         win.transient(root)
@@ -1678,6 +1943,7 @@ def run_gui(initial_url=None):
         q_v = tk.StringVar(value=mgr.settings["video_quality"])
         start_v = tk.BooleanVar(value=True)
         pl_v = tk.BooleanVar(value=is_whole_playlist_url(url))
+        season_v = tk.BooleanVar(value=season)
         items_v = tk.StringVar(value="")
 
         r = 0
@@ -1726,6 +1992,12 @@ def run_gui(initial_url=None):
         ttk.Label(prow, text="  e.g. 1-20 or 3,5,9 (blank = all)",
                   foreground="#777").pack(side="left")
         r += 1
+        season_chk = ttk.Checkbutton(
+            frm, variable=season_v,
+            text="Whole season — follow the numbered episode links on this page "
+                 "(uses “Only items” too)")
+        season_chk.grid(row=r, column=0, columnspan=3, sticky="w", pady=3)
+        r += 1
         ttk.Label(frm, text="Mirrors:").grid(row=r, column=0, sticky="nw", pady=3)
         mir_txt = tk.Text(frm, height=3, width=60, wrap="none", font=("Consolas", 9))
         mir_txt.grid(row=r, column=1, columnspan=2, sticky="ew", pady=3)
@@ -1760,6 +2032,13 @@ def run_gui(initial_url=None):
             except Exception:
                 conns = mgr.settings["connections"]
             last_clip[0] = u
+            if season_v.get() and not is_video_url(u):
+                mgr.add_series(u, dir_v.get().strip(), conns, q_v.get(),
+                               ref_v.get().strip(), cookie_v.get().strip(), user_agent,
+                               items=items_v.get(), start=start_v.get(),
+                               links=series_links)
+                win.destroy()
+                return
             if vid_v.get() and pl_v.get() and is_playlist_url(u):
                 mgr.add_playlist(u, dir_v.get().strip(), conns, q_v.get(),
                                  ref_v.get().strip(), cookie_v.get().strip(), user_agent,
@@ -1777,6 +2056,12 @@ def run_gui(initial_url=None):
 
         def on_url_change(*_):
             u = url_v.get().strip()
+            page_like = bool(re.match(r"^https?://", u)) and not is_video_url(u) \
+                and not re.search(r"\.(zip|rar|7z|exe|msi|iso|apk|mp4|mkv|webm|m3u8|mpd|mp3|pdf)"
+                                  r"(\?|$)", urllib.parse.urlsplit(u).path + "?", re.I)
+            season_chk.state(["!disabled"] if page_like else ["disabled"])
+            if not page_like:
+                season_v.set(False)
             vid_v.set(is_video_url(u) or (vid_v.get() and not re.match(r"^https?://", u)))
             if is_playlist_url(u):
                 pl_chk.state(["!disabled"])
@@ -1926,6 +2211,15 @@ def run_gui(initial_url=None):
                 req = mgr.incoming.get_nowait()
             except queue.Empty:
                 break
+            if req.get("series"):
+                if mgr.settings.get("ask_before_start", True):
+                    add_dialog(req["url"], "", req["referer"], req["cookie"],
+                               req["user_agent"], False, from_browser=True,
+                               season=True, series_links=req.get("links"))
+                else:
+                    mgr.add_series(req["url"], referer=req["referer"], cookie=req["cookie"],
+                                   user_agent=req["user_agent"], links=req.get("links"))
+                continue
             same = next((x for x in mgr.downloads if x.id == req.get("mirror_of")), None)
             if same is not None and messagebox.askyesno(
                     "Same file from another host",
@@ -2065,15 +2359,21 @@ def run_cli(argv):
     ap.add_argument("-m", "--mirror", action="append", default=[],
                     help="another link to the same file (repeatable)")
     ap.add_argument("--playlist", action="store_true", help="download the whole playlist")
-    ap.add_argument("--items", default="", help="playlist items, e.g. 1-10")
+    ap.add_argument("--items", default="", help="playlist/season items, e.g. 1-10")
+    ap.add_argument("--season", action="store_true",
+                    help="series page: download every numbered episode into one folder")
     a = ap.parse_args(argv)
     mgr = Manager(persist=False)
     mgr.settings["speed_limit_kb"] = a.limit
     mgr.apply_settings()
-    if a.playlist:
+    if a.playlist or a.season:
         done = threading.Event()
-        mgr.add_playlist(a.url, a.output or os.getcwd(), a.connections, a.quality,
-                         items=a.items, done=lambda *x: done.set())
+        if a.season:
+            mgr.add_series(a.url, a.output or os.getcwd(), a.connections, a.quality,
+                           a.referer, a.cookie, items=a.items, done=lambda *x: done.set())
+        else:
+            mgr.add_playlist(a.url, a.output or os.getcwd(), a.connections, a.quality,
+                             items=a.items, done=lambda *x: done.set())
         done.wait()
         print(mgr.notice)
         try:

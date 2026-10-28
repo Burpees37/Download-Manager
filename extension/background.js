@@ -189,9 +189,26 @@ api.runtime.onInstalled.addListener(async () => {
     contexts: ["link"] });
   api.contextMenus.create({ id: "jm-video", title: "Download video with JM Download Manager",
     contexts: ["page", "video", "link"] });
+  api.contextMenus.create({ id: "jm-season", title: "Download all episodes on this page (whole season)",
+    contexts: ["page"] });
 });
 
+// Whole season: send the page plus the links as the browser shows them
+// (so episode lists built by JavaScript are included too).
+async function sendSeason(tab) {
+  let links = [];
+  try {
+    links = await api.tabs.sendMessage(tab.id, { type: "links" }, { frameId: 0 });
+  } catch (e) { /* page without the content script: the app reads the HTML itself */ }
+  return sendToApp({ url: tab.url, referer: tab.url, series: true, links: links || [],
+                     title: tab.title });
+}
+
 api.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === "jm-season") {
+    sendSeason(tab);
+    return;
+  }
   if (info.menuItemId === "jm-link") {
     sendToApp({ url: info.linkUrl, referer: info.pageUrl || "", video: isVideoSite(info.linkUrl) });
   } else if (info.menuItemId === "jm-video") {
@@ -220,6 +237,10 @@ api.runtime.onMessage.addListener((msg, sender, reply) => {
     const tabP = sender.tab ? Promise.resolve(sender.tab)
                             : api.tabs.get(msg.tabId);
     tabP.then(tab => reply({ choices: choicesFor(tab, msg.frameUrl, msg.src), title: tab.title }));
+    return true;
+  }
+  if (msg.type === "season") {
+    api.tabs.get(msg.tabId).then(sendSeason).then(ok => reply({ ok }));
     return true;
   }
   if (msg.type === "grab") {

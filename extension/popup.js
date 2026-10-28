@@ -44,3 +44,10 @@ $("vid").addEventListener("click", async () => {
   }
   $("msg").textContent = choices.length ? "Pick one:" : "Nothing found yet — play the video first.";
 });
+
+$("season").addEventListener("click", async () => {
+  const [tab] = await api.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !/^https?:/.test(tab.url || "")) { $("msg").textContent = "Open the series page first."; return; }
+  const r = await api.runtime.sendMessage({ type: "season", tabId: tab.id });
+  $("msg").textContent = r && r.ok ? "Sent — the app is reading the episodes ✓" : "Couldn't reach the app.";
+});

@@ -116,8 +116,12 @@
     menu.hidden = false;
   }
 
-  api.runtime.onMessage.addListener((msg) => {
+  api.runtime.onMessage.addListener((msg, sender, reply) => {
     if (msg.type === "media-found") place();
+    if (msg.type === "links" && window === window.top) {
+      reply([...document.links].slice(0, 3000).map(l =>
+        [l.href, (l.textContent || l.title || "").trim().slice(0, 100)]));
+    }
   });
   document.addEventListener("click", () => { if (menu) menu.hidden = true; });
   addEventListener("scroll", place, { passive: true, capture: true });

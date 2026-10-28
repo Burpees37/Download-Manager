@@ -54,6 +54,7 @@ The extension popup has switches for catching downloads, the video button, and s
 | **YouTube / Facebook video** | Click **⬇ Download video** on the player, paste the link into the app, or use the extension popup. |
 | **Video on any other site** | Press play, then click **⬇ Download video** on the player. If the page plays several streams, pick one from the list. |
 | **YouTube playlist / channel** | Paste the link. The app recognises playlist links and ticks **Whole playlist / channel** for you. For a single video that sits inside a playlist, you choose. If a link turns out not to be a real playlist (for example a YouTube Mix), it downloads the single video instead. *Only items* takes `1-20` or `3,5,9`. Videos are numbered and saved in a folder named after the playlist. |
+| **Whole season from a series page** | On a page with a cover and numbered episode links (1, 2, 3… or "Episode 1"…), right-click → **Download all episodes on this page**, or paste the page into the app and tick **Whole season**. The app opens each episode, finds its video (MP4, HLS stream or embedded player) and downloads them in order into a folder named after the series: `Show - E01.mp4`, `Show - E02.mp4`…, plus `cover.jpg`. *Only items* (e.g. `1-6`) limits which episodes. Stray numbered links, like a year or comment pages, are ignored. Using right-click also works when the episode list is built by JavaScript. |
 | **Game in many parts** | Add every part. 3 download at a time and the rest queue (change this in Settings). |
 
 ## Scope and limits
