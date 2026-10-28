@@ -43,12 +43,20 @@ jobs:
           Copy-Item extension pkg\extension -Recurse
           Compress-Archive pkg\* JM-Download-Manager-Windows.zip
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: JM-Download-Manager-Windows
-          path: JM-Download-Manager-Windows.zip
+      # Every push to main refreshes the "Latest build" download on the Releases page.
+      # (Releases don't use the account's limited Actions artifact storage.)
+      - name: Publish latest build
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --cleanup-tag -y || true
+          gh release create latest JM-Download-Manager-Windows.zip --prerelease \
+            --title "Latest build" --target "$GITHUB_SHA" \
+            --notes "Built automatically from the newest code. Unzip, run JM Download Manager.exe, then load the extension folder in Chrome/Edge (see README)."
 
-      - name: Publish release (when you push a tag like v1.0.0)
+      - name: Publish versioned release (when you push a tag like v1.2.0)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:

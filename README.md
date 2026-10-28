@@ -17,7 +17,7 @@ Every downloaded file was checked byte-for-byte against the original.
 
 ## Get the app
 
-**Easiest:** open this repo's **Actions** tab, open the latest *Build Windows app* run, and download **JM-Download-Manager-Windows** at the bottom. It contains the `.exe`, ffmpeg and the extension. Unzip it anywhere, for example `D:\JM-Download-Manager`.
+**Easiest:** open this repo's **Releases** page and download **JM-Download-Manager-Windows.zip** from *Latest build*. It contains the `.exe`, ffmpeg and the extension. Unzip it anywhere, for example `D:\JM-Download-Manager`.
 
 To publish a proper release, push a tag such as `v1.1.0`. The zip then appears on the **Releases** page.
 
