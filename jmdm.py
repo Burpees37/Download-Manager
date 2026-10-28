@@ -34,15 +34,18 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import http.server
+import http.client
 
 APP_NAME = "JM Download Manager"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 CHUNK = 64 * 1024
 MIN_SPLIT = 256 * 1024          # never split a part smaller than 2x this
 MAX_CONNECTIONS = 32            # per host
 MAX_TOTAL_CONNECTIONS = 96      # across all mirrors of one file
+STALL_SECONDS = 5               # no data this long = reconnect
+SOCKET_TIMEOUT = 30
 LISTEN_PORT = 8721
 
 VIDEO_SITES = ("youtube.com", "youtu.be", "facebook.com", "fb.watch", "fb.com",
@@ -142,10 +145,8 @@ def is_whole_playlist_url(url):
 
 
 def playlist_url(url):
-    p = urllib.parse.urlparse(url)
-    q = urllib.parse.parse_qs(p.query)
-    if "list" in q:
-        return "https://www.youtube.com/playlist?list=" + q["list"][0]
+    """Link to hand yt-dlp for a list. A watch?v=..&list=.. link is kept as is,
+    because YouTube Mixes (list=RD...) only work in that form."""
     return url
 
 
@@ -210,13 +211,19 @@ class RateLimiter:
 # segmented HTTP download
 # --------------------------------------------------------------------------
 class Segment:
-    __slots__ = ("start", "end", "pos", "owner")
+    __slots__ = ("start", "end", "pos", "owner", "rate", "last_data", "started",
+                 "kick", "kicked_at", "link")
 
     def __init__(self, start, end, pos=None):
         self.start = start
         self.end = end              # inclusive; may shrink when another connection steals half
         self.pos = start if pos is None else pos
         self.owner = False
+        self.rate = 0.0             # this part's current speed (bytes/s)
+        self.last_data = self.started = time.monotonic()
+        self.kick = False           # watchdog asks the connection to reconnect
+        self.kicked_at = 0.0
+        self.link = None            # the connection currently filling this part
 
     def remaining(self):
         return max(0, self.end - self.pos + 1)
@@ -262,6 +269,10 @@ class Download:
         self._f = None
         self._last_error = ""
         self._sample = (time.monotonic(), 0)
+        self.conn_opened = 0        # stats: new TCP/TLS connections
+        self.conn_reused = 0        # stats: parts that reused an open connection
+        self.splits = 0             # stats: dynamic splits
+        self.kicks = 0              # stats: slow/stalled connections replaced
 
     # ---- persistence -----------------------------------------------------
     def to_dict(self):
@@ -478,6 +489,7 @@ class Download:
                         self._accepting = False
                         break
                 alive[0].join(0.5)
+                self._watchdog()
             self._f.flush()
             self._f.close()
             self._f = None
@@ -517,21 +529,69 @@ class Download:
             for s in self.segments:
                 if not s.owner and s.remaining() > 0:
                     s.owner = True
+                    s.rate, s.last_data, s.kicked_at = 0.0, time.monotonic(), s.kicked_at
                     return s
             if not self.resumable:
                 return None
-            # dynamic segmentation: steal the back half of the biggest active part
-            best = max((s for s in self.segments
-                        if s.owner and s.remaining() >= 2 * MIN_SPLIT),
-                       key=lambda s: s.remaining(), default=None)
-            if best is None:
+            # Dynamic segmentation driven by network conditions: help the part
+            # that will take LONGEST to finish (remaining bytes / its own speed),
+            # and split it so both halves should finish at the same moment.
+            active = [s for s in self.segments if s.owner and s.remaining() >= 2 * MIN_SPLIT]
+            if not active:
                 return None
-            mid = best.pos + best.remaining() // 2
+            now = time.monotonic()
+
+            def eff_rate(s):
+                if now - s.last_data > 2.0 and now - s.started > 2.0:
+                    return 0.0                      # silent for 2 s: treat as stuck
+                return s.rate
+
+            rates = [eff_rate(s) for s in active if eff_rate(s) > 0]
+            avg = sum(rates) / len(rates) if rates else 0.0
+
+            def time_left(s):
+                r = eff_rate(s)
+                if r == 0 and now - s.started < 2.0:
+                    r = avg                         # just started, no measurement yet
+                return s.remaining() / r if r > 0 else float("inf")
+
+            best = max(active, key=lambda s: (time_left(s), s.remaining()))
+            if time_left(best) < 1.0:
+                return None                         # nearly done; a new connection won't help
+            r_owner = eff_rate(best) if eff_rate(best) > 0 else (0.0 if time_left(best) == float("inf") else avg)
+            r_new = avg or r_owner
+            keep = int(best.remaining() * r_owner / (r_owner + r_new)) if r_owner + r_new > 0 else 0
+            keep = max(MIN_SPLIT, min(best.remaining() - MIN_SPLIT, keep))
+            mid = best.pos + keep
             new = Segment(mid, best.end)
             new.owner = True
+            new.last_data = time.monotonic()
             best.end = mid - 1
             self.segments.append(new)
+            self.splits += 1
             return new
+
+    def _watchdog(self):
+        """Called every ~0.5 s while downloading: kick connections that stalled
+        or run far slower than the others, so they reconnect (often to a
+        faster server) instead of dragging the whole download out."""
+        now = time.monotonic()
+        with self._lock:
+            active = [s for s in self.segments if s.owner and s.remaining() > 0]
+            rates = sorted(s.rate for s in active if s.rate > 0)
+            median = rates[len(rates) // 2] if rates else 0.0
+            for s in active:
+                if now - s.kicked_at < 10:
+                    continue
+                stalled = now - s.last_data > STALL_SECONDS
+                slow = (median > 0 and len(rates) >= 3 and 0 < s.rate < median / 5
+                        and s.remaining() > 4 * MIN_SPLIT and now - s.started > 5)
+                if stalled or slow:
+                    s.kick = True
+                    s.kicked_at = now
+                    self.kicks += 1
+                    if stalled and s.link is not None:
+                        s.link.abort()             # unblock a read that is stuck waiting
 
     def _other_source(self, src):
         with self._lock:
@@ -540,46 +600,53 @@ class Download:
 
     def _worker(self, src):
         fails = 0
-        while not self._stop.is_set():
-            seg = self._take_segment()
-            if seg is None:
-                return
-            try:
-                self._fetch(seg, src)
-                fails = 0
-            except Exception as e:
-                fails += 1
-                self._last_error = (f"HTTP {e.code} {e.reason}"
-                                    if isinstance(e, urllib.error.HTTPError) else clean_err(e))
-                if fails >= 4:
-                    other = self._other_source(src)
-                    if other is not None:           # this host is failing; move to another
-                        src["bad"] = True
-                        src, fails = other, 0
-                        continue
-                if fails >= 8:
+        link = Link(self)                          # this connection's reusable socket
+        try:
+            while not self._stop.is_set():
+                seg = self._take_segment()
+                if seg is None:
                     return
-                self._stop.wait(min(1.5 * fails, 10))
-            finally:
-                with self._lock:
-                    seg.owner = False
+                try:
+                    self._fetch(seg, src, link)
+                    fails = 0
+                except Exception as e:
+                    link.close()
+                    fails += 1
+                    self._last_error = (f"HTTP {e.code} {e.reason}"
+                                        if isinstance(e, urllib.error.HTTPError)
+                                        else clean_err(e))
+                    if fails >= 4:
+                        other = self._other_source(src)
+                        if other is not None:       # this host keeps failing; move on
+                            src["bad"] = True
+                            src, fails = other, 0
+                            continue
+                    if fails >= 8:
+                        return
+                    self._stop.wait(min(1.5 * fails, 10))
+                finally:
+                    with self._lock:
+                        seg.owner = False
+                        seg.kick = False
+        finally:
+            link.close()
 
-    def _fetch(self, seg, src):
+    def _fetch(self, seg, src, link):
         f = self._f
         if self.resumable:
             with self._lock:
                 start, end = seg.pos, seg.end
             if start > end:
                 return
-            resp = self._open(src, start, end)
-            if resp.getcode() != 206:
-                resp.close()
+            resp = link.get(src, start, end)
+            if resp.status != 206:
+                link.close()
                 raise IOError("Server stopped accepting multi-part requests "
                               "(the link may have expired)")
-            cr = resp.headers.get("Content-Range") or ""
+            cr = resp.getheader("Content-Range") or ""
             m = re.match(r"bytes\s+(\d+)-", cr)
             if m and int(m.group(1)) != start:
-                resp.close()
+                link.close()
                 raise IOError("Server returned the wrong part of the file")
         else:
             with self._lock:
@@ -587,18 +654,27 @@ class Download:
                 seg.pos = 0
                 f.seek(0)
                 f.truncate()
-            resp = self._open(src)
+            resp = link.get(src)
         with self._lock:
             self.active_conns += 1
             src["active"] += 1
             self.hosts_active = sum(1 for s in self._sources if s["active"] > 0)
+            seg.started = seg.last_data = time.monotonic()
+            seg.rate = 0.0
+            seg.link = link
         ended_by_server = False
+        complete_read = False
+        win_t, win_b = time.monotonic(), 0
         try:
             while not self._stop.is_set():
+                if seg.kick:
+                    break                            # watchdog: reconnect this part
                 data = resp.read(CHUNK)
                 if not data:
                     ended_by_server = True
+                    complete_read = True
                     break
+                now = time.monotonic()
                 with self._lock:
                     if self.resumable:
                         allowed = seg.end - seg.pos + 1
@@ -610,13 +686,27 @@ class Download:
                     f.write(data)
                     seg.pos += len(data)
                     self.downloaded += len(data)
+                    seg.last_data = now
+                    win_b += len(data)
+                    if now - win_t >= 0.5:
+                        inst = win_b / (now - win_t)
+                        seg.rate = inst if seg.rate == 0 else seg.rate * 0.5 + inst * 0.5
+                        win_t, win_b = now, 0
                 self.m.limiter.consume(len(data), self._stop)
         finally:
             with self._lock:
+                seg.link = None
                 self.active_conns -= 1
                 src["active"] -= 1
                 self.hosts_active = sum(1 for s in self._sources if s["active"] > 0)
-            resp.close()
+            if complete_read and not resp.will_close:
+                link.release()                       # keep the socket for the next part
+            else:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                link.close()                         # unread data left: can't reuse it
         if ended_by_server:
             with self._lock:
                 if self.resumable:
@@ -626,6 +716,145 @@ class Download:
                     if self.size and self.size > 0 and seg.pos < self.size:
                         raise IOError("Connection closed early")
                     seg.end = seg.pos - 1
+
+
+class Link:
+    """One worker's keep-alive HTTP(S) connection.
+
+    * The socket (and its TLS session) stays open between parts, so taking a
+      new part costs one request instead of a new TCP + TLS handshake.
+    * The final URL after redirects is remembered per source, so later parts
+      go straight to the file server instead of replaying the redirect chain
+      (that's IDM's "connection replay"). If that URL stops working, it falls
+      back to the original link once.
+    """
+
+    def __init__(self, dl):
+        self.dl = dl
+        self.conn = None
+        self.key = None
+
+    def close(self):
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+        self.conn, self.key = None, None
+
+    def release(self):
+        pass                                        # socket stays open for reuse
+
+    def abort(self):
+        """Called by the watchdog from another thread to break a stuck read."""
+        try:
+            sock = self.conn.sock if self.conn is not None else None
+            if sock is not None:
+                import socket
+                sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+
+    def _connect(self, key):
+        scheme, host, port = key
+        if self.conn is not None and self.key == key:
+            self.dl.conn_reused += 1
+            return self.conn
+        self.close()
+        cls = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+        kw = {"timeout": SOCKET_TIMEOUT}
+        if scheme == "https":
+            kw["context"] = _ssl_ctx()
+        self.conn = cls(host, port, **kw)
+        self.key = key
+        self.dl.conn_opened += 1
+        return self.conn
+
+    def get(self, src, start=None, end=None):
+        if _uses_proxy(src["url"]):
+            return _UrllibResp(self.dl._open(src, start, end, timeout=SOCKET_TIMEOUT))
+        headers = self.dl._headers(src)
+        if start is not None:
+            headers["Range"] = f"bytes={start}-" + ("" if end is None else str(end))
+        url = src.get("resolved") or src["url"]
+        used_cache = "resolved" in src
+        for _hop in range(8):
+            p = urllib.parse.urlsplit(url)
+            key = (p.scheme, p.hostname, p.port or (443 if p.scheme == "https" else 80))
+            path = (p.path or "/") + ("?" + p.query if p.query else "")
+            hdrs = dict(headers, Host=p.netloc)
+            for attempt in (0, 1):
+                conn = self._connect(key)
+                try:
+                    conn.request("GET", path, headers=hdrs)
+                    resp = conn.getresponse()
+                    break
+                except (http.client.RemoteDisconnected, ConnectionResetError,
+                        BrokenPipeError, http.client.CannotSendRequest,
+                        http.client.BadStatusLine):
+                    self.close()                    # stale keep-alive socket; reconnect once
+                    if attempt:
+                        raise
+            if resp.status in (301, 302, 303, 307, 308):
+                loc = resp.getheader("Location")
+                resp.read()
+                if resp.will_close:
+                    self.close()
+                if not loc:
+                    raise IOError("Redirect without a target")
+                url = urllib.parse.urljoin(url, loc)
+                continue
+            if resp.status >= 400:
+                resp.read(65536)
+                self.close()
+                if used_cache:                       # remembered URL expired: start over
+                    src.pop("resolved", None)
+                    url, used_cache = src["url"], False
+                    continue
+                raise urllib.error.HTTPError(url, resp.status, resp.reason, resp.msg, None)
+            src["resolved"] = url
+            return resp
+        raise IOError("Too many redirects")
+
+
+class _UrllibResp:
+    """Gives a urllib response the same small interface as http.client's."""
+
+    def __init__(self, r):
+        self.r = r
+        self.status = r.getcode()
+        self.will_close = True
+
+    def getheader(self, name, default=None):
+        return self.r.headers.get(name, default)
+
+    def read(self, n=-1):
+        return self.r.read(n)
+
+    def close(self):
+        self.r.close()
+
+
+_SSL = None
+
+
+def _ssl_ctx():
+    global _SSL
+    if _SSL is None:
+        import ssl
+        _SSL = ssl.create_default_context()
+    return _SSL
+
+
+def _uses_proxy(url):
+    """If Windows/env proxy settings apply, let urllib handle the request."""
+    try:
+        proxies = urllib.request.getproxies()
+        host = urllib.parse.urlsplit(url).hostname or ""
+        scheme = urllib.parse.urlsplit(url).scheme
+        return scheme in proxies and not urllib.request.proxy_bypass(host)
+    except Exception:
+        return False
 
 
 def parse_probe(resp):
@@ -927,10 +1156,26 @@ class Manager:
                         "http_headers": headers}
                 if items.strip():
                     opts["playlist_items"] = items.strip()
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(playlist_url(url), download=False)
+                try:
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(playlist_url(url), download=False)
+                except Exception as ex:
+                    info, list_err = None, clean_err(ex)
+                else:
+                    list_err = ""
+                entries = [e for e in ((info or {}).get("entries") or []) if e]
+                if not entries:
+                    # Not really a list (or the list is private/unavailable):
+                    # just download the video the link points at.
+                    if is_whole_playlist_url(url):
+                        raise IOError(list_err or "This playlist is empty or private")
+                    self.add(url, folder, "", connections, referer, cookie,
+                             user_agent, video=True, quality=quality, start=start)
+                    self.notice = "Not a playlist — downloading the single video"
+                    if done:
+                        done(1, "", "")
+                    return
                 title = sanitize(info.get("title") or "Playlist")
-                entries = [e for e in (info.get("entries") or []) if e]
                 width = max(2, len(str(len(entries))))
                 sub = os.path.join(folder, title)
                 for i, e in enumerate(entries, 1):
@@ -1327,7 +1572,7 @@ def run_gui(initial_url=None):
         vid_v = tk.BooleanVar(value=is_video_url(url) if video is None else video)
         q_v = tk.StringVar(value=mgr.settings["video_quality"])
         start_v = tk.BooleanVar(value=True)
-        pl_v = tk.BooleanVar(value=is_playlist_url(url))
+        pl_v = tk.BooleanVar(value=is_whole_playlist_url(url))
         items_v = tk.StringVar(value="")
 
         r = 0
@@ -1368,7 +1613,8 @@ def run_gui(initial_url=None):
         r += 1
         prow = ttk.Frame(frm)
         prow.grid(row=r, column=0, columnspan=3, sticky="w", pady=3)
-        ttk.Checkbutton(prow, text="Whole playlist / channel", variable=pl_v).pack(side="left")
+        pl_chk = ttk.Checkbutton(prow, text="Whole playlist / channel", variable=pl_v)
+        pl_chk.pack(side="left")
         ttk.Label(prow, text="   Only items:").pack(side="left")
         ttk.Entry(prow, textvariable=items_v, width=14).pack(side="left")
         ttk.Label(prow, text="  e.g. 1-20 or 3,5,9 (blank = all)",
@@ -1423,6 +1669,24 @@ def run_gui(initial_url=None):
             win.destroy()
             tree_select[0] = d.id
 
+        def on_url_change(*_):
+            u = url_v.get().strip()
+            vid_v.set(is_video_url(u) or (vid_v.get() and not re.match(r"^https?://", u)))
+            if is_playlist_url(u):
+                pl_chk.state(["!disabled"])
+                if is_whole_playlist_url(u):
+                    pl_v.set(True)
+                    pl_chk.configure(text="Whole playlist / channel")
+                else:
+                    # a single video that sits inside a playlist: user chooses
+                    pl_chk.configure(text="Whole playlist (this video is part of one)")
+            else:
+                pl_v.set(False)
+                pl_chk.state(["disabled"])
+                pl_chk.configure(text="Whole playlist / channel")
+
+        url_v.trace_add("write", on_url_change)
+        on_url_change()
         ttk.Button(btns, text="Download", command=ok).pack(side="left", padx=4)
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="left")
         win.bind("<Return>", lambda e: ok())
