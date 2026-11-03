@@ -20,7 +20,11 @@ def test_double_clicked_just_starts_the_app(monkeypatch):
     nh = load()
     started = []
     monkeypatch.setattr(nh, "launch", lambda: started.append(1) or True)
-    monkeypatch.setattr(sys, "stdin", None)                 # windowless .exe, no browser
+    # A double-clicked windowless .exe: Windows gives it no pipe handles, so
+    # Python's stdin/stdout are None. Skip the Windows handle lookup (the test
+    # runner itself has real handles) and check the fallback.
+    monkeypatch.setattr(nh.os, "name", "posix")
+    monkeypatch.setattr(sys, "stdin", None)
     monkeypatch.setattr(sys, "stdout", None)
     nh.main()                                               # must not crash
     assert started == [1]
