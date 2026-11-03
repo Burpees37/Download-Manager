@@ -25,6 +25,7 @@ def isolated(tmp_path, monkeypatch):
     saved = dict(sys.modules)
     path = list(sys.path)
     updates._forget_ytdlp()
+    updates._ytdlp_source[0] = "bundled"
     yield tmp_path
     updates._forget_ytdlp()
     sys.modules.update({k: v for k, v in saved.items() if k.startswith("yt_dlp")})
@@ -41,16 +42,40 @@ def test_ytdlp_updates_and_loads(isolated, server, monkeypatch):
     assert updates.update_ytdlp() == ""                         # already current
 
 
-def test_broken_update_is_set_aside(isolated):
+def fake_bundled(folder, version):
+    """A yt-dlp 'built into the app', as on a PC (or CI) where it is installed."""
+    pkg = folder / "bundled" / "yt_dlp"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("from . import version\n")
+    (pkg / "version.py").write_text(f"__version__ = '{version}'\n")
+    sys.path.append(str(folder / "bundled"))
+
+
+@pytest.mark.parametrize("bundled", [False, True])
+def test_broken_update_is_set_aside(isolated, bundled):
+    if bundled:
+        fake_bundled(isolated, "2000.01.01")
     z = updates.ytdlp_zip()
     os.makedirs(os.path.dirname(z))
     with open(z, "wb") as fh:
         fh.write(b"not a zip")
     try:
-        updates.load_ytdlp()
+        mod = updates.load_ytdlp()
+        assert bundled and mod.version.__version__ == "2000.01.01"
     except ImportError:
-        pass                                                 # no bundled copy in tests
+        assert not bundled
     assert os.path.exists(z + ".bad") and not os.path.exists(z)
+    assert updates._ytdlp_source[0] == "bundled"
+
+
+def test_good_update_beats_bundled(isolated, server, monkeypatch):
+    fake_bundled(isolated, "2000.01.01")
+    server.httpd.blobs["y"] = fake_ytdlp("2099.01.02")
+    monkeypatch.setattr(updates, "latest_ytdlp_version", lambda: "2099.01.02")
+    monkeypatch.setattr(updates, "YTDLP_FILE", server.url("/blob?b=y"))
+    assert updates.ytdlp_version() == "2000.01.01"
+    assert updates.update_ytdlp() == "2099.01.02"
+    assert updates.ytdlp_version() == "2099.01.02" and updates._ytdlp_source[0] == "updated"
 
 
 def test_wrong_download_is_rejected(isolated, server, monkeypatch):

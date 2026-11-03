@@ -32,6 +32,19 @@ def _forget_ytdlp():
         del sys.modules[k]
 
 
+def _inside(path, folder):
+    a = os.path.normcase(os.path.abspath(path or ""))
+    return a.startswith(os.path.normcase(os.path.abspath(folder)) + os.sep)
+
+
+def _set_aside(z):
+    sys.path_importer_cache.pop(z, None)
+    try:
+        os.replace(z, z + ".bad")
+    except OSError:
+        pass
+
+
 def load_ytdlp():
     """Import yt-dlp, preferring the updated copy; falls back to the one built
     into the app if the update can't load (then it is set aside)."""
@@ -43,15 +56,21 @@ def load_ytdlp():
             sys.path.insert(0, z)
             try:
                 import yt_dlp
-                _ytdlp_source[0] = "updated"
+                if _inside(yt_dlp.__file__, z):
+                    _ytdlp_source[0] = "updated"
+                    return yt_dlp
+                # The file held no usable yt-dlp, so Python quietly took the
+                # built-in one: keep that, but set the file aside.
+                sys.path.remove(z)
+                _set_aside(z)
+                _ytdlp_source[0] = "bundled"
                 return yt_dlp
             except Exception:
-                sys.path.remove(z)
+                if z in sys.path:
+                    sys.path.remove(z)
                 _forget_ytdlp()
-                try:
-                    os.replace(z, z + ".bad")
-                except OSError:
-                    pass
+                _set_aside(z)
+        _ytdlp_source[0] = "bundled"
         import yt_dlp
         _ytdlp_source[0] = "bundled"
         return yt_dlp
