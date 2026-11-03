@@ -22,17 +22,24 @@ DEFAULT_PORT = 8721
 
 def _std_streams():
     """Raw stdin/stdout even when built as a windowless .exe (where Python
-    may set sys.stdin/sys.stdout to None)."""
+    may set sys.stdin/sys.stdout to None). Returns (None, None) when there
+    is no browser on the other end, e.g. the helper was double-clicked."""
     if os.name == "nt":
         try:
             import ctypes
             import msvcrt
             k32 = ctypes.windll.kernel32
-            fin = msvcrt.open_osfhandle(k32.GetStdHandle(-10), os.O_RDONLY | os.O_BINARY)
-            fout = msvcrt.open_osfhandle(k32.GetStdHandle(-11), os.O_BINARY)
-            return os.fdopen(fin, "rb", buffering=0), os.fdopen(fout, "wb", buffering=0)
+            k32.GetStdHandle.restype = ctypes.c_void_p      # a 64-bit handle, not an int
+            h_in, h_out = k32.GetStdHandle(-10), k32.GetStdHandle(-11)
+            bad = (None, 0, ctypes.c_void_p(-1).value)
+            if h_in not in bad and h_out not in bad:
+                fin = msvcrt.open_osfhandle(h_in, os.O_RDONLY | os.O_BINARY)
+                fout = msvcrt.open_osfhandle(h_out, os.O_BINARY)
+                return os.fdopen(fin, "rb", buffering=0), os.fdopen(fout, "wb", buffering=0)
         except Exception:
             pass
+    if sys.stdin is None or sys.stdout is None:
+        return None, None
     return sys.stdin.buffer, sys.stdout.buffer
 
 
@@ -89,6 +96,11 @@ def launch():
 
 def main():
     fin, fout = _std_streams()
+    if fin is None:
+        # Not started by the browser (double-clicked, or a shortcut): behave
+        # like the app's shortcut instead of failing.
+        launch()
+        return
 
     def reply(obj):
         data = json.dumps(obj).encode("utf-8")
