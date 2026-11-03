@@ -39,7 +39,7 @@ import html.parser
 import base64
 
 APP_NAME = "JM Download Manager"
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 CHUNK = 64 * 1024
@@ -49,6 +49,15 @@ MAX_TOTAL_CONNECTIONS = 96      # across all mirrors of one file
 STALL_SECONDS = 5               # no data this long = reconnect
 SOCKET_TIMEOUT = 30
 LISTEN_PORT = 8721
+# Which browser downloads the extension hands to the app (IDM-style rules).
+# The extension keeps a copy; whichever side changed last wins.
+DEFAULT_CAPTURE_TYPES = ("zip rar 7z tar gz bz2 xz zst iso img bin cue exe msi msix appx "
+                         "apk xapk apks obb jar dmg deb rpm mp4 mkv avi mov wmv flv webm "
+                         "m4v mpg mpeg 3gp mp3 m4a aac flac wav ogg opus wma")
+CAPTURE_KEYS = ("browser_capture", "capture_types", "capture_min_kb", "capture_exclude",
+                "capture_updated")
+# How long a caught download waits for the Add dialog before the browser keeps it.
+DECISION_WAIT = 240
 NATIVE_HOST = "com.jmbuilds.jmdm"
 CHROME_EXTENSION_ID = "lmaohoejkhjffbfcngbcjhidlcefefdi"     # fixed by the "key" in extension/manifest.json
 FIREFOX_EXTENSION_ID = "jmdm@jmbuilds"
@@ -1698,6 +1707,26 @@ def resolve_link(url, referer="", cookie="", user_agent="", max_hops=10,
 # --------------------------------------------------------------------------
 # manager: queue, persistence, browser listener
 # --------------------------------------------------------------------------
+def settle(job, accepted):
+    """Record the answer for a browser download that is waiting on the Add
+    dialog. Returns False when the wait already ran out and the browser kept
+    the file, so the app must not download it as well."""
+    dec = job.get("decision")
+    if not dec:
+        return True
+    with dec["lock"]:
+        if dec["expired"]:
+            return False
+        dec["accepted"] = accepted
+        dec["event"].set()
+        return True
+
+
+def decision_expired(job):
+    dec = job.get("decision")
+    return bool(dec and dec["expired"])
+
+
 class Manager:
     def __init__(self, data_dir=None, persist=True):
         self.persist = persist
@@ -1711,6 +1740,11 @@ class Manager:
             "ask_before_start": True,
             "listen_port": LISTEN_PORT,
             "video_quality": "best",
+            "browser_capture": True,
+            "capture_types": DEFAULT_CAPTURE_TYPES,
+            "capture_min_kb": 0,
+            "capture_exclude": "",
+            "capture_updated": 0,
         }
         self.downloads = []
         self.limiter = RateLimiter()
@@ -1758,6 +1792,29 @@ class Manager:
 
     def mark_dirty(self):
         self._dirty = True
+
+    def capture_settings(self):
+        return {k: self.settings[k] for k in CAPTURE_KEYS}
+
+    def update_capture(self, new):
+        """Rules sent by the extension; kept only if newer than ours."""
+        try:
+            stamp = float(new.get("capture_updated", 0))
+        except (TypeError, ValueError):
+            return False
+        if stamp <= float(self.settings.get("capture_updated", 0)):
+            return False
+        try:
+            self.settings.update(
+                browser_capture=bool(new.get("browser_capture", True)),
+                capture_types=str(new.get("capture_types", ""))[:2000],
+                capture_min_kb=max(0, int(new.get("capture_min_kb", 0))),
+                capture_exclude=str(new.get("capture_exclude", ""))[:4000],
+                capture_updated=stamp)
+        except (TypeError, ValueError):
+            return False
+        self.mark_dirty()
+        return True
 
     def apply_settings(self):
         self.limiter.rate = int(self.settings.get("speed_limit_kb", 0)) * 1024
@@ -2090,9 +2147,38 @@ class Manager:
             def do_GET(self):
                 if self.path == "/ping" and self._allowed():
                     return self._reply(200, {"app": APP_NAME, "version": VERSION})
+                if self.path == "/settings" and self._allowed():
+                    return self._reply(200, mgr.capture_settings())
                 self._reply(403, {"error": "forbidden"})
 
+            def _hand_over(self, job, wait):
+                """Queue a caught download. With "Ask before starting" on, the
+                browser holds its copy until the Add dialog is answered:
+                Download -> ok; Cancel or no answer -> the browser keeps it."""
+                if not (wait and mgr.settings.get("ask_before_start", True)):
+                    self._reply(200, {"ok": True})
+                    mgr.incoming.put(job)
+                    return
+                dec = {"event": threading.Event(), "lock": threading.Lock(),
+                       "accepted": False, "expired": False}
+                job["decision"] = dec
+                mgr.incoming.put(job)
+                dec["event"].wait(DECISION_WAIT)
+                with dec["lock"]:
+                    if not dec["event"].is_set():
+                        dec["expired"] = True
+                ok = dec["accepted"] and not dec["expired"]
+                self._reply(200, {"ok": ok} if ok else
+                            {"ok": False, "error": "cancelled in the app"})
+
             def do_POST(self):
+                if self.path == "/settings" and self._allowed():
+                    try:
+                        n = int(self.headers.get("Content-Length", "0"))
+                        mgr.update_capture(json.loads(self.rfile.read(min(n, 1 << 16)) or b"{}"))
+                    except Exception:
+                        return self._reply(400, {"error": "bad request"})
+                    return self._reply(200, mgr.capture_settings())
                 if self.path != "/add" or not self._allowed():
                     return self._reply(403, {"error": "forbidden"})
                 try:
@@ -2143,9 +2229,7 @@ class Manager:
                         same = mgr.find_same_file(r["info"]["size"], r["url"])
                         if same:
                             job["mirror_of"] = same.id
-                    self._reply(200, {"ok": True})
-                    mgr.incoming.put(job)
-                    return
+                    return self._hand_over(job, bool(req.get("wait")))
                 self._reply(200, {"ok": True})
                 if not job["video"] and not job["series"] and not is_gate_url(url):
                     # same size as a file already downloading -> offer it as a mirror
@@ -2358,7 +2442,9 @@ def run_gui(initial_url=None):
             mgr.add_mirror(d, u.strip(), user_agent=d.user_agent)
 
     def add_dialog(url="", filename="", referer="", cookie="", user_agent="",
-                   video=None, from_browser=False, season=False, series_links=None):
+                   video=None, from_browser=False, season=False, series_links=None,
+                   job=None):
+        # job: a browser download held until this dialog is answered
         win = tk.Toplevel(root)
         win.title("Add download")
         win.transient(root)
@@ -2472,6 +2558,11 @@ def run_gui(initial_url=None):
                 conns = int(conn_v.get())
             except Exception:
                 conns = mgr.settings["connections"]
+            if job is not None and not settle(job, True):
+                messagebox.showinfo("Add download", "The browser already downloaded this "
+                                    "file because nobody answered in time.", parent=win)
+                win.destroy()
+                return
             last_clip[0] = u
             if season_v.get() and not is_video_url(u):
                 mgr.add_series(u, dir_v.get().strip(), conns, q_v.get(),
@@ -2520,9 +2611,31 @@ def run_gui(initial_url=None):
         url_v.trace_add("write", on_url_change)
         on_url_change()
         ttk.Button(btns, text="Download", command=ok).pack(side="left", padx=4)
-        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="left")
+        def cancel():
+            if job is not None:
+                settle(job, False)                     # the browser downloads it instead
+            win.destroy()
+
+        def watch_expiry():
+            try:
+                if not win.winfo_exists():
+                    return
+            except tk.TclError:
+                return                                 # dialog already closed
+            if decision_expired(job):
+                win.destroy()                          # timed out: the browser kept it
+                mgr.notice = "No answer in time — the browser downloaded it instead"
+                return
+            win.after(1000, watch_expiry)
+
+        if job is not None:
+            ttk.Label(frm, text="Cancel lets the browser download it as usual.",
+                      foreground="#777").grid(row=r + 1, column=0, columnspan=3, sticky="w")
+            win.after(1000, watch_expiry)
+        ttk.Button(btns, text="Cancel", command=cancel).pack(side="left")
+        win.protocol("WM_DELETE_WINDOW", cancel)
         win.bind("<Return>", lambda e: ok())
-        win.bind("<Escape>", lambda e: win.destroy())
+        win.bind("<Escape>", lambda e: cancel())
         e_url.focus_set()
         win.lift()
         win.attributes("-topmost", True)
@@ -2543,6 +2656,10 @@ def run_gui(initial_url=None):
         clip_v = tk.BooleanVar(value=s["clipboard_watch"])
         ask_v = tk.BooleanVar(value=s["ask_before_start"])
         q_v = tk.StringVar(value=s["video_quality"])
+        cap_v = tk.BooleanVar(value=s["browser_capture"])
+        types_v = tk.StringVar(value=s["capture_types"])
+        min_v = tk.IntVar(value=s["capture_min_kb"])
+        excl_v = tk.StringVar(value=s["capture_exclude"])
         rows = [
             ("Default folder:", ttk.Entry(frm, textvariable=dir_v, width=50)),
             ("Connections per file:", ttk.Spinbox(frm, from_=1, to=MAX_CONNECTIONS,
@@ -2569,13 +2686,34 @@ def run_gui(initial_url=None):
                         variable=clip_v).grid(row=n, column=0, columnspan=3, sticky="w")
         ttk.Checkbutton(frm, text="Ask before starting downloads sent from the browser",
                         variable=ask_v).grid(row=n + 1, column=0, columnspan=3, sticky="w")
+        cap = ttk.LabelFrame(frm, text="Browser downloads (same rules as the extension popup)",
+                             padding=8)
+        cap.grid(row=n + 2, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        cap.columnconfigure(1, weight=1)
+        ttk.Checkbutton(cap, text="Catch downloads started in the browser",
+                        variable=cap_v).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(cap, text="File types:").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Entry(cap, textvariable=types_v, width=60).grid(row=1, column=1, sticky="ew", pady=3)
+        ttk.Button(cap, text="Default", command=lambda: types_v.set(DEFAULT_CAPTURE_TYPES)
+                   ).grid(row=1, column=2, padx=(6, 0))
+        ttk.Label(cap, text="(blank = every file type)", foreground="#777"
+                  ).grid(row=2, column=1, sticky="w")
+        ttk.Label(cap, text="Smaller than (KB):").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Spinbox(cap, from_=0, to=10000000, increment=100, textvariable=min_v,
+                    width=10).grid(row=3, column=1, sticky="w", pady=3)
+        ttk.Label(cap, text="Never catch on:").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Entry(cap, textvariable=excl_v).grid(row=4, column=1, columnspan=2, sticky="ew",
+                                                 pady=3)
+        ttk.Label(cap, text="Sites separated by spaces, e.g. drive.google.com mega.nz. "
+                            "Hold Alt while clicking a link to skip the app once.",
+                  foreground="#777").grid(row=5, column=0, columnspan=3, sticky="w")
         ff = find_ffmpeg()
         notes = [f"Browser extension: {'listening on port ' + str(s['listen_port']) if listening else 'port busy — is another copy running?'}",
                  f"Browser can start the app: {'yes — ' if integration['ok'] else 'no — '}{integration['msg']}",
                  f"yt-dlp (video sites): {'installed' if have_ytdlp() else 'NOT installed'}",
                  f"ffmpeg (HD video + audio merge): {ff or 'not found — put ffmpeg.exe next to the app'}"]
         ttk.Label(frm, text="\n".join(notes), foreground="#555",
-                  justify="left").grid(row=n + 2, column=0, columnspan=3, sticky="w",
+                  justify="left").grid(row=n + 3, column=0, columnspan=3, sticky="w",
                                        pady=(10, 0))
 
         def save():
@@ -2587,6 +2725,13 @@ def run_gui(initial_url=None):
                          clipboard_watch=clip_v.get(),
                          ask_before_start=ask_v.get(),
                          video_quality=q_v.get())
+                rules = (cap_v.get(), " ".join(types_v.get().split()),
+                         max(0, int(min_v.get())), " ".join(excl_v.get().split()))
+                if rules != (s["browser_capture"], s["capture_types"], s["capture_min_kb"],
+                             s["capture_exclude"]):
+                    s.update(browser_capture=rules[0], capture_types=rules[1],
+                             capture_min_kb=rules[2], capture_exclude=rules[3],
+                             capture_updated=time.time())
             except Exception:
                 messagebox.showerror("Settings", "Please enter whole numbers.", parent=win)
                 return
@@ -2594,7 +2739,7 @@ def run_gui(initial_url=None):
             win.destroy()
 
         b = ttk.Frame(frm)
-        b.grid(row=n + 3, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        b.grid(row=n + 4, column=0, columnspan=3, sticky="e", pady=(12, 0))
         ttk.Button(b, text="Save", command=save).pack(side="left", padx=4)
         ttk.Button(b, text="Cancel", command=win.destroy).pack(side="left")
 
@@ -2661,13 +2806,15 @@ def run_gui(initial_url=None):
                     mgr.add_series(req["url"], referer=req["referer"], cookie=req["cookie"],
                                    user_agent=req["user_agent"], links=req.get("links"))
                 continue
+            if decision_expired(req):
+                continue                               # the browser already kept it
             same = next((x for x in mgr.downloads if x.id == req.get("mirror_of")), None)
             if same is not None and messagebox.askyesno(
                     "Same file from another host",
                     f"This looks like the same file as\n\n  {same.filename}\n"
                     f"({human_size(same.size)})\n\nUse it as an extra mirror? Both hosts "
                     "will download it together, so their speeds add up.\n\n"
-                    "Choose No to download it separately."):
+                    "Choose No to download it separately.") and settle(req, True):
                 mgr.add_mirror(same, req["url"], req["referer"], req["cookie"],
                                req["user_agent"])
                 tree_select[0] = same.id
@@ -2677,7 +2824,7 @@ def run_gui(initial_url=None):
                 req["filename"] = sanitize(req["title"])   # stream from a generic site
             if mgr.settings.get("ask_before_start", True):
                 add_dialog(req["url"], req["filename"], req["referer"], req["cookie"],
-                           req["user_agent"], req["video"], from_browser=True)
+                           req["user_agent"], req["video"], from_browser=True, job=req)
             elif req["video"] and is_whole_playlist_url(req["url"]):
                 mgr.add_playlist(req["url"], referer=req["referer"], cookie=req["cookie"],
                                  user_agent=req["user_agent"])

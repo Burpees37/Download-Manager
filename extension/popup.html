@@ -16,6 +16,15 @@
   #list div:hover { background: #e2ebfa; }
   p { color: #666; font-size: 12px; margin: 10px 0 0; }
   hr { border: 0; border-top: 1px solid #e5e5e5; margin: 10px 0; }
+  details { margin: 2px 0 6px; }
+  summary { cursor: pointer; color: #1d5fbf; font-weight: 600; padding: 3px 0; }
+  details label.f { display: block; margin: 8px 0 3px; color: #444; }
+  textarea, input[type=number] { width: 100%; box-sizing: border-box; font: 12px "Segoe UI", system-ui, sans-serif;
+           border: 1px solid #cfd6e0; border-radius: 5px; padding: 5px 6px; }
+  textarea { height: 52px; resize: vertical; }
+  input[type=number] { width: 90px; }
+  .hint { color: #777; font-size: 11px; margin-top: 2px; }
+  .link { all: unset; color: #1d5fbf; font-size: 11px; cursor: pointer; text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -24,6 +33,18 @@
   <button id="start" class="ghost" hidden>Start the app</button>
   <hr>
   <div class="row"><label for="cap">Catch browser downloads</label><input type="checkbox" id="cap"></div>
+  <details id="rules">
+    <summary>Catch rules</summary>
+    <label class="f" for="types">File types to catch</label>
+    <textarea id="types" spellcheck="false"></textarea>
+    <div class="hint">Blank = every type. <button class="link" id="reset">Use defaults</button></div>
+    <label class="f" for="min">Skip files smaller than (KB)</label>
+    <input type="number" id="min" min="0" step="100">
+    <label class="f" for="excl">Never catch on these sites</label>
+    <textarea id="excl" spellcheck="false" placeholder="drive.google.com mega.nz"></textarea>
+    <div class="hint">Hold <b>Alt</b> while clicking a link to let the browser download it once.
+      Same rules as the app's Settings.</div>
+  </details>
   <div class="row"><label for="btn">Show button on videos</label><input type="checkbox" id="btn"></div>
   <div class="row"><label for="auto">Start the app when needed</label><input type="checkbox" id="auto"></div>
   <button id="vid">Download video on this tab</button>

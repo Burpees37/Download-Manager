@@ -124,6 +124,12 @@
     }
   });
   document.addEventListener("click", () => { if (menu) menu.hidden = true; });
+  // Alt + click on a link: let the browser download it instead of the app.
+  for (const ev of ["mousedown", "click"]) {
+    addEventListener(ev, (e) => {
+      if (e.altKey && e.button === 0) api.runtime.sendMessage({ type: "bypass" }).catch(() => {});
+    }, true);
+  }
   addEventListener("scroll", place, { passive: true, capture: true });
   addEventListener("resize", place);
   setInterval(place, 800);

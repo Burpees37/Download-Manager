@@ -44,6 +44,14 @@ Firefox removes temporary add-ons when it closes. For a permanent install, the e
 
 The extension popup has switches for catching downloads, the video button, and starting the app automatically.
 
+### Catching browser downloads (like IDM)
+In Chrome, Edge and Brave the extension takes a download **before the browser saves anything or shows "Save as"**, so nothing lands twice in your Downloads folder. Firefox pauses the download the moment it starts instead.
+
+- **Catch rules.** Only the file types in the list are caught (archives, installers, disk images, APKs, video and audio by default). You can also skip small files and list sites that should never be caught. Edit them in the popup under *Catch rules* or in the app's *Settings*. Both share the same rules, and whichever you changed last wins.
+- **Hold Alt** while clicking a link to let the browser download that one file normally.
+- **Cancel gives it back.** With *Ask before starting* on, the browser waits while the app's Add dialog is open. Press *Cancel* (or leave it for 4 minutes) and the browser downloads the file as usual.
+- If the app can't start or can't open the link, the browser keeps the download.
+
 ## How to download…
 
 | What | How |

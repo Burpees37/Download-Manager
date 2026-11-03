@@ -25,12 +25,15 @@ function isVideoSite(url) {
 // ---------------------------------------------------------------------------
 // talking to the app
 // ---------------------------------------------------------------------------
+let aliveAt = 0;               // last time the app answered
 async function appAlive(ms = 800) {
+  if (Date.now() - aliveAt < 3000) return true;
   try {
     const c = new AbortController();
     const t = setTimeout(() => c.abort(), ms);
     const r = await fetch(APP + "/ping", { headers: HDR, signal: c.signal });
     clearTimeout(t);
+    if (r.ok) { aliveAt = Date.now(); syncRules(); }
     return r.ok;
   } catch (e) { return false; }
 }
@@ -122,15 +125,100 @@ api.webRequest.onBeforeRequest.addListener((d) => {
 }, { urls: ["<all_urls>"], types: ["main_frame", "sub_frame", "other", "xmlhttprequest"] },
    ["requestBody"]);
 
+// ---------------------------------------------------------------------------
+// which downloads to catch (IDM-style rules, shared with the app's Settings)
+// ---------------------------------------------------------------------------
+const RULE_DEFAULTS = {
+  browser_capture: true,
+  capture_types: "zip rar 7z tar gz bz2 xz zst iso img bin cue exe msi msix appx apk xapk " +
+    "apks obb jar dmg deb rpm mp4 mkv avi mov wmv flv webm m4v mpg mpeg 3gp mp3 m4a aac " +
+    "flac wav ogg opus wma",
+  capture_min_kb: 0,
+  capture_exclude: "",
+  capture_updated: 0
+};
+
+async function getRules() {
+  const v = await api.storage.local.get([...Object.keys(RULE_DEFAULTS), "capture"]);
+  const r = { ...RULE_DEFAULTS };
+  for (const k of Object.keys(RULE_DEFAULTS)) if (v[k] !== undefined) r[k] = v[k];
+  if (v.browser_capture === undefined && v.capture === false) r.browser_capture = false; // old switch
+  return r;
+}
+
+// Whichever side changed the rules last wins.
+let syncedAt = 0;
+async function syncRules(force = false) {
+  if (!force && Date.now() - syncedAt < 30000) return;
+  syncedAt = Date.now();
+  try {
+    const local = await getRules();
+    let r = await fetch(APP + "/settings", { headers: HDR });
+    if (!r.ok) return;                               // older app without rules
+    const app = await r.json();
+    if ((app.capture_updated || 0) > (local.capture_updated || 0)) {
+      const copy = {};
+      for (const k of Object.keys(RULE_DEFAULTS)) if (app[k] !== undefined) copy[k] = app[k];
+      await api.storage.local.set(copy);
+    } else if ((local.capture_updated || 0) > (app.capture_updated || 0)) {
+      await fetch(APP + "/settings", { method: "POST",
+        headers: { ...HDR, "Content-Type": "application/json" }, body: JSON.stringify(local) });
+    }
+  } catch (e) { /* app closed: the local copy is used */ }
+}
+
+function words(text) {
+  return String(text || "").toLowerCase().split(/[\s,;]+/).filter(Boolean);
+}
+function extOf(name) {
+  const m = /\.([a-z0-9]{1,8})$/i.exec(name || "");
+  return m ? m[1].toLowerCase() : "";
+}
+function onSite(url, sites) {
+  const h = host(url);
+  return !!h && sites.some(d => h === d || h.endsWith("." + d));
+}
+
+// Hold Alt while clicking a link: that one download stays in the browser.
+let bypassUntil = 0;
+
+// Why a download should stay in the browser, or "" when the app should take it.
+async function skipReason(item, url) {
+  const rules = await getRules();
+  if (!rules.browser_capture) return "catching is off";
+  if (!/^https?:/i.test(url)) return "not a web link";     // blob:/data: can't be re-opened
+  if (item.byExtensionId) return "started by an extension";
+  if (Date.now() < bypassUntil) { bypassUntil = 0; return "Alt was held"; }
+  const sites = words(rules.capture_exclude)
+    .map(x => x.replace(/^[a-z]+:\/\//, "").replace(/\/.*$/, "").replace(/^\*?\./, ""));
+  if ([url, item.url, item.referrer].some(u => u && onSite(u, sites))) return "excluded site";
+  const types = words(rules.capture_types).map(x => x.replace(/^\*?\./, ""));
+  if (types.length) {
+    const name = (item.filename || "").split(/[\\/]/).pop();
+    let ext = extOf(name);
+    if (!ext) { try { ext = extOf(new URL(url).pathname); } catch (e) {} }
+    if (!types.includes(ext)) return "file type not in the list";
+  }
+  const size = item.totalBytes > 0 ? item.totalBytes : (item.fileSize > 0 ? item.fileSize : 0);
+  const min = Number(rules.capture_min_kb) || 0;
+  if (min > 0 && size > 0 && size < min * 1024) return "smaller than the minimum";
+  return "";
+}
+
 // Ask the app to take a download, and wait until it has really reached the
-// file. Only then does the browser drop its own copy.
+// file — and, with "Ask before starting" on, until the Add dialog is answered.
+// Only then does the browser drop its own copy.
 async function checkWithApp(job) {
   job.cookie = job.cookie ?? await cookieHeader(job.url);
   job.userAgent = navigator.userAgent;
   job.verify = true;
+  job.wait = true;
+  // A service worker that looks idle for 30 s gets stopped; touching an
+  // extension API keeps it awake while the dialog is open.
+  const keep = setInterval(() => api.runtime.getPlatformInfo().catch(() => {}), 20000);
   try {
     const c = new AbortController();
-    const t = setTimeout(() => c.abort(), 40000);
+    const t = setTimeout(() => c.abort(), 270000);   // the app gives up after 240 s
     const r = await fetch(APP + "/add", {
       method: "POST", signal: c.signal,
       headers: { ...HDR, "Content-Type": "application/json" },
@@ -140,36 +228,59 @@ async function checkWithApp(job) {
     if (!r.ok) return { ok: false };
     return await r.json();
   } catch (e) { return { ok: false }; }
+  finally { clearInterval(keep); }
 }
 
-api.downloads.onCreated.addListener(async (item) => {
-  const { capture = true } = await api.storage.local.get("capture");
-  if (!capture) return;
+// Offer a held download to the app. True = the app took it.
+async function offerToApp(item) {
   const url = item.finalUrl || item.url;
-  if (!/^https?:/i.test(url)) return;             // blob:/data: can't be re-downloaded
-  if (item.byExtensionId) return;
-  // If the app is closed, start it (fast); if that doesn't work in time,
-  // let the browser keep the download.
-  if (!(await appAlive()) && !(await launchApp())) return;
+  if (await skipReason(item, url)) return false;
+  // If the app is closed, start it; if that doesn't work, the browser keeps it.
+  if (!(await appAlive()) && !(await launchApp())) return false;
   const form = posts.get(url.split("#")[0]) || posts.get((item.url || "").split("#")[0]);
-  // Hold the browser's download while the app checks the link.
-  let paused = false;
-  try { await api.downloads.pause(item.id); paused = true; } catch (e) { /* already done */ }
   const filename = (item.filename || "").split(/[\\/]/).pop();
   const res = await checkWithApp({ url, referer: item.referrer || "", filename, video: false,
                                    post: form ? form.body : "" });
-  if (res && res.ok) {
-    try {
-      await api.downloads.cancel(item.id);
-      await api.downloads.erase({ id: item.id });
-    } catch (e) { /* already finished */ }
-    flash("✓", "#2e7d32");
-  } else {
-    // The app couldn't get it (for example a one-time link): the browser keeps it.
-    if (paused) { try { await api.downloads.resume(item.id); } catch (e) {} }
-    flash("↓", "#f9a825");
-  }
-});
+  return !!(res && res.ok);
+}
+
+async function dropBrowserCopy(id) {
+  try { await api.downloads.cancel(id); } catch (e) { /* already gone */ }
+  try { await api.downloads.erase({ id }); } catch (e) {}
+}
+
+if (api.downloads.onDeterminingFilename) {
+  // Chrome, Edge, Brave: the browser asks for a file name before it saves
+  // anything or shows "Save as". Holding the answer holds the download, so the
+  // app takes it before a file lands in your Downloads folder.
+  api.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    offerToApp(item).then(async (taken) => {
+      if (taken) {
+        await dropBrowserCopy(item.id);
+        flash("✓", "#2e7d32");
+      } else {
+        suggest();                                   // carry on as a normal download
+      }
+    }).catch(() => suggest());
+    return true;                                     // we answer later
+  });
+} else {
+  // Firefox has no such hook: pause the download as soon as it starts instead.
+  api.downloads.onCreated.addListener(async (item) => {
+    const url = item.finalUrl || item.url;
+    if (await skipReason(item, url)) return;
+    let paused = false;
+    try { await api.downloads.pause(item.id); paused = true; } catch (e) { /* already done */ }
+    if (await offerToApp(item)) {
+      await dropBrowserCopy(item.id);
+      flash("✓", "#2e7d32");
+    } else {
+      // The app couldn't get it or you cancelled: the browser keeps it.
+      if (paused) { try { await api.downloads.resume(item.id); } catch (e) {} }
+      flash("↓", "#f9a825");
+    }
+  });
+}
 
 // ---------------------------------------------------------------------------
 // 2) remember the media each tab loads
@@ -287,8 +398,16 @@ api.contextMenus.onClicked.addListener((info, tab) => {
 // 4) messages from the popup and the in-page button
 // ---------------------------------------------------------------------------
 api.runtime.onMessage.addListener((msg, sender, reply) => {
-  if (msg.type === "status") {
-    appAlive().then(ok => reply({ ok }));
+  if (msg.type === "bypass") {                    // Alt + click on a page
+    bypassUntil = Date.now() + 4000;
+    return;
+  }
+  if (msg.type === "rules-changed") {             // edited in the popup
+    syncRules(true);
+    return;
+  }
+  if (msg.type === "status") {                    // popup opened: also pull the app's rules
+    appAlive().then(async ok => { if (ok) await syncRules(true); reply({ ok }); });
     return true;
   }
   if (msg.type === "launch") {
