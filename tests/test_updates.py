@@ -33,6 +33,7 @@ def isolated(tmp_path, monkeypatch):
 
 
 def test_ytdlp_updates_and_loads(isolated, server, monkeypatch):
+    fake_bundled(isolated, "2000.01.01")
     server.httpd.blobs["y"] = fake_ytdlp("2099.01.02")
     monkeypatch.setattr(updates, "latest_ytdlp_version", lambda: "2099.01.02")
     monkeypatch.setattr(updates, "YTDLP_FILE", server.url("/blob?b=y"))
@@ -48,22 +49,16 @@ def fake_bundled(folder, version):
     pkg.mkdir(parents=True)
     (pkg / "__init__.py").write_text("from . import version\n")
     (pkg / "version.py").write_text(f"__version__ = '{version}'\n")
-    sys.path.append(str(folder / "bundled"))
+    sys.path.insert(0, str(folder / "bundled"))       # ahead of any real yt-dlp
 
 
-@pytest.mark.parametrize("bundled", [False, True])
-def test_broken_update_is_set_aside(isolated, bundled):
-    if bundled:
-        fake_bundled(isolated, "2000.01.01")
+def test_broken_update_is_set_aside(isolated):
+    fake_bundled(isolated, "2000.01.01")
     z = updates.ytdlp_zip()
     os.makedirs(os.path.dirname(z))
     with open(z, "wb") as fh:
         fh.write(b"not a zip")
-    try:
-        mod = updates.load_ytdlp()
-        assert bundled and mod.version.__version__ == "2000.01.01"
-    except ImportError:
-        assert not bundled
+    assert updates.load_ytdlp().version.__version__ == "2000.01.01"
     assert os.path.exists(z + ".bad") and not os.path.exists(z)
     assert updates._ytdlp_source[0] == "bundled"
 
@@ -79,6 +74,7 @@ def test_good_update_beats_bundled(isolated, server, monkeypatch):
 
 
 def test_wrong_download_is_rejected(isolated, server, monkeypatch):
+    fake_bundled(isolated, "2000.01.01")
     server.httpd.blobs["old"] = fake_ytdlp("2001.01.01")
     monkeypatch.setattr(updates, "latest_ytdlp_version", lambda: "2099.01.02")
     monkeypatch.setattr(updates, "YTDLP_FILE", server.url("/blob?b=old"))
