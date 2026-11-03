@@ -39,7 +39,8 @@ import html.parser
 import base64
 
 APP_NAME = "JM Download Manager"
-VERSION = "1.6.0"
+VERSION = "1.7.0"
+BUILD = 0          # set by the GitHub build (run number); 0 = built by hand
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 CHUNK = 64 * 1024
@@ -190,12 +191,210 @@ def find_ffmpeg():
     return shutil.which("ffmpeg")
 
 
+# --------------------------------------------------------------------------
+# updates: yt-dlp (quietly, daily) and the app itself (asks first)
+# --------------------------------------------------------------------------
+REPO = "Burpees37/Download-Manager"
+APP_UPDATE_INFO = f"https://github.com/{REPO}/releases/download/latest/version.json"
+APP_UPDATE_ZIP = f"https://github.com/{REPO}/releases/download/latest/JM-Download-Manager-Windows.zip"
+YTDLP_LATEST = "https://github.com/yt-dlp/yt-dlp/releases/latest"
+YTDLP_FILE = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+_ytdlp_lock = threading.Lock()
+_ytdlp_source = ["bundled"]
+
+
+def ytdlp_zip():
+    """A newer yt-dlp downloaded by the app. Python imports it straight from
+    the file, so the .exe doesn't need rebuilding when YouTube changes."""
+    return os.path.join(app_dir(), "jmdm_data", "yt-dlp", "yt-dlp.zip")
+
+
+def _forget_ytdlp():
+    for k in [k for k in sys.modules if k == "yt_dlp" or k.startswith("yt_dlp.")]:
+        del sys.modules[k]
+
+
+def load_ytdlp():
+    """Import yt-dlp, preferring the updated copy; falls back to the one built
+    into the app if the update can't load (then it is set aside)."""
+    with _ytdlp_lock:
+        if "yt_dlp" in sys.modules:
+            return sys.modules["yt_dlp"]
+        z = ytdlp_zip()
+        if os.path.isfile(z):
+            sys.path.insert(0, z)
+            try:
+                import yt_dlp
+                _ytdlp_source[0] = "updated"
+                return yt_dlp
+            except Exception:
+                sys.path.remove(z)
+                _forget_ytdlp()
+                try:
+                    os.replace(z, z + ".bad")
+                except OSError:
+                    pass
+        import yt_dlp
+        _ytdlp_source[0] = "bundled"
+        return yt_dlp
+
+
 def have_ytdlp():
     try:
-        import yt_dlp  # noqa: F401
+        load_ytdlp()
         return True
     except Exception:
         return False
+
+
+def ytdlp_version():
+    try:
+        return load_ytdlp().version.__version__
+    except Exception:
+        return ""
+
+
+def _ver_tuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")) or (0,)
+
+
+def _get(url, timeout=30):
+    req = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{VERSION}"})
+    return urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx())
+
+
+def latest_ytdlp_version():
+    # The releases/latest page redirects to .../tag/<version>; no API limits.
+    class Stop(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **kw):
+            return None
+    opener = urllib.request.build_opener(
+        Stop, urllib.request.HTTPSHandler(context=_ssl_ctx()))
+    try:
+        r = opener.open(urllib.request.Request(YTDLP_LATEST, method="HEAD"), timeout=20)
+        loc = r.geturl()
+    except urllib.error.HTTPError as e:
+        loc = e.headers.get("Location", "")
+    m = re.search(r"/tag/([\w.]+)", loc or "")
+    if m:
+        return m.group(1)
+    with _get("https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest") as r:
+        return json.load(r)["tag_name"]
+
+
+def _zip_ytdlp_version(path):
+    import zipfile
+    with zipfile.ZipFile(path) as zf:
+        text = zf.read("yt_dlp/version.py").decode("utf-8", "replace")
+    m = re.search(r"__version__\s*=\s*['\"]([^'\"]+)", text)
+    return m.group(1) if m else ""
+
+
+def update_ytdlp(busy=lambda: False):
+    """Download a newer yt-dlp if there is one. Returns the new version, or
+    "" when already current. busy(): True while a video download runs."""
+    latest = latest_ytdlp_version()
+    if _ver_tuple(latest) <= _ver_tuple(ytdlp_version()):
+        return ""
+    z = ytdlp_zip()
+    os.makedirs(os.path.dirname(z), exist_ok=True)
+    tmp = z + ".part"
+    with _get(YTDLP_FILE, timeout=120) as r, open(tmp, "wb") as fh:
+        shutil.copyfileobj(r, fh)
+    got = _zip_ytdlp_version(tmp)                 # also proves it's a real zip
+    if _ver_tuple(got) < _ver_tuple(latest):
+        os.remove(tmp)
+        raise ValueError("downloaded yt-dlp looks wrong")
+    os.replace(tmp, z)
+    with _ytdlp_lock:
+        if not busy():
+            _forget_ytdlp()                       # next video uses the new one
+    return got
+
+
+def app_update_available():
+    """{"version", "build"} of a newer build on GitHub, or None. Only for the
+    .exe made by the GitHub build (BUILD > 0); hand-built copies are skipped."""
+    if not getattr(sys, "frozen", False) or os.name != "nt" or BUILD <= 0:
+        return None
+    with _get(APP_UPDATE_INFO) as r:
+        info = json.load(r)
+    if int(info.get("build", 0)) > BUILD:
+        return {"version": str(info.get("version", "")), "build": int(info["build"])}
+    return None
+
+
+def _manifest_version(folder):
+    try:
+        with open(os.path.join(folder, "extension", "manifest.json"), encoding="utf-8") as fh:
+            return json.load(fh).get("version", "")
+    except Exception:
+        return ""
+
+
+def prepare_app_update(progress=lambda done, total: None):
+    """Download and unpack the new build, then write a script that swaps the
+    files once this app has closed and starts it again. Returns
+    (script path, extension_changed). jmdm_data (list, settings) is untouched."""
+    import zipfile
+    import tempfile
+    here = app_dir()
+    work = os.path.join(tempfile.gettempdir(), "jmdm-update")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    zpath = os.path.join(work, "update.zip")
+    with _get(APP_UPDATE_ZIP, timeout=60) as r, open(zpath, "wb") as fh:
+        total = int(r.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk:
+                break
+            fh.write(chunk)
+            done += len(chunk)
+            progress(done, total)
+    new = os.path.join(work, "new")
+    with zipfile.ZipFile(zpath) as zf:
+        zf.extractall(new)
+    if not os.path.isfile(os.path.join(new, APP_NAME + ".exe")):
+        raise ValueError("the update is missing the app")
+    ext_changed = _manifest_version(new) != _manifest_version(here)
+    exe = os.path.join(here, APP_NAME + ".exe")
+    bat = os.path.join(work, "update.bat")
+    lines = [
+        "@echo off",
+        f"set PID={os.getpid()}",
+        "set W=0",
+        ":wait",
+        # tasklist names the .exe only while that exact process still runs
+        'tasklist /FI "PID eq %PID%" /NH 2>nul | find /i ".exe" >nul || goto closed',
+        "set /a W+=1",
+        "if %W% lss 60 (timeout /t 1 /nobreak >nul & goto wait)",
+        ":closed",
+    ]
+    files = [f for f in os.listdir(new) if os.path.isfile(os.path.join(new, f))]
+    for i, f in enumerate(files):
+        # retry: the browser helper or ffmpeg may still be closing
+        lines += ["set N=0",
+                  f":copy{i}",
+                  f'copy /y "{os.path.join(new, f)}" "{here}" >nul && goto next{i}',
+                  "set /a N+=1",
+                  f"if %N% lss 30 (timeout /t 1 /nobreak >nul & goto copy{i})",
+                  f":next{i}"]
+    if os.path.isdir(os.path.join(new, "extension")):
+        lines.append(f'xcopy /e /i /y /q "{os.path.join(new, "extension")}" '
+                     f'"{os.path.join(here, "extension")}" >nul')
+    # start the new app, then remove this folder (the script included)
+    lines += [f'start "" "{exe}"', 'cd /d "%TEMP%"', f'(goto) 2>nul & rd /s /q "{work}"']
+    with open(bat, "w", encoding="mbcs" if os.name == "nt" else "utf-8") as fh:
+        fh.write("\r\n".join(lines) + "\r\n")
+    return bat, ext_changed
+
+
+def run_app_update(bat):
+    import subprocess
+    flags = 0x08000000 | 0x00000008               # CREATE_NO_WINDOW | DETACHED_PROCESS
+    subprocess.Popen(["cmd", "/c", bat], creationflags=flags, close_fds=True)
 
 
 def register_browser_integration():
@@ -1045,7 +1244,7 @@ class VideoDownload(Download):
 
     def _run(self):
         try:
-            import yt_dlp
+            yt_dlp = load_ytdlp()
         except Exception:
             self.status = "Error"
             self.error = "yt-dlp is not installed (pip install yt-dlp)"
@@ -1745,6 +1944,9 @@ class Manager:
             "capture_min_kb": 0,
             "capture_exclude": "",
             "capture_updated": 0,
+            "auto_update_ytdlp": True,
+            "check_app_updates": True,
+            "last_update_check": 0,
         }
         self.downloads = []
         self.limiter = RateLimiter()
@@ -1886,7 +2088,7 @@ class Manager:
         def work():
             count, title, err = 0, "", ""
             try:
-                import yt_dlp
+                yt_dlp = load_ytdlp()
                 headers = {"User-Agent": user_agent or UA}
                 if cookie:
                     headers["Cookie"] = cookie
@@ -2654,6 +2856,8 @@ def run_gui(initial_url=None):
         act_v = tk.IntVar(value=s["max_active"])
         lim_v = tk.IntVar(value=s["speed_limit_kb"])
         clip_v = tk.BooleanVar(value=s["clipboard_watch"])
+        ytu_v = tk.BooleanVar(value=s["auto_update_ytdlp"])
+        appu_v = tk.BooleanVar(value=s["check_app_updates"])
         ask_v = tk.BooleanVar(value=s["ask_before_start"])
         q_v = tk.StringVar(value=s["video_quality"])
         cap_v = tk.BooleanVar(value=s["browser_capture"])
@@ -2707,13 +2911,26 @@ def run_gui(initial_url=None):
         ttk.Label(cap, text="Sites separated by spaces, e.g. drive.google.com mega.nz. "
                             "Hold Alt while clicking a link to skip the app once.",
                   foreground="#777").grid(row=5, column=0, columnspan=3, sticky="w")
+        upf = ttk.LabelFrame(frm, text="Updates", padding=8)
+        upf.grid(row=n + 3, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        upf.columnconfigure(0, weight=1)
+        ttk.Checkbutton(upf, text="Keep yt-dlp (YouTube, Facebook…) up to date by itself",
+                        variable=ytu_v).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(upf, text="Tell me when a new version of the app is out",
+                        variable=appu_v).grid(row=1, column=0, sticky="w")
+        ttk.Button(upf, text="Check now", command=lambda: update_check(manual=True)
+                   ).grid(row=0, column=1, rowspan=2, padx=(6, 0))
+        build = f"build {BUILD}" if BUILD else "built by hand — app updates come from git"
+        ttk.Label(upf, text=f"App {VERSION} ({build}) · yt-dlp {ytdlp_version() or '—'} "
+                            f"({_ytdlp_source[0]})", foreground="#777"
+                  ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ff = find_ffmpeg()
         notes = [f"Browser extension: {'listening on port ' + str(s['listen_port']) if listening else 'port busy — is another copy running?'}",
                  f"Browser can start the app: {'yes — ' if integration['ok'] else 'no — '}{integration['msg']}",
                  f"yt-dlp (video sites): {'installed' if have_ytdlp() else 'NOT installed'}",
                  f"ffmpeg (HD video + audio merge): {ff or 'not found — put ffmpeg.exe next to the app'}"]
         ttk.Label(frm, text="\n".join(notes), foreground="#555",
-                  justify="left").grid(row=n + 3, column=0, columnspan=3, sticky="w",
+                  justify="left").grid(row=n + 4, column=0, columnspan=3, sticky="w",
                                        pady=(10, 0))
 
         def save():
@@ -2724,6 +2941,8 @@ def run_gui(initial_url=None):
                          speed_limit_kb=max(0, int(lim_v.get())),
                          clipboard_watch=clip_v.get(),
                          ask_before_start=ask_v.get(),
+                         auto_update_ytdlp=ytu_v.get(),
+                         check_app_updates=appu_v.get(),
                          video_quality=q_v.get())
                 rules = (cap_v.get(), " ".join(types_v.get().split()),
                          max(0, int(min_v.get())), " ".join(excl_v.get().split()))
@@ -2739,9 +2958,121 @@ def run_gui(initial_url=None):
             win.destroy()
 
         b = ttk.Frame(frm)
-        b.grid(row=n + 4, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        b.grid(row=n + 5, column=0, columnspan=3, sticky="e", pady=(12, 0))
         ttk.Button(b, text="Save", command=save).pack(side="left", padx=4)
         ttk.Button(b, text="Cancel", command=win.destroy).pack(side="left")
+
+    # ---- updates ----
+    upd = {"busy": False, "offer": None, "report": None, "ready": None}
+
+    def video_busy():
+        return any(d.kind == "video" and d.status == "Downloading" for d in mgr.downloads)
+
+    def update_check(manual=False):
+        if upd["busy"]:
+            return
+        upd["busy"] = True
+
+        def work():
+            lines = []
+            try:
+                if manual or mgr.settings.get("auto_update_ytdlp", True):
+                    try:
+                        v = update_ytdlp(video_busy)
+                        if v:
+                            mgr.notice = f"yt-dlp updated to {v}"
+                            lines.append(f"yt-dlp updated to {v}.")
+                        else:
+                            lines.append(f"yt-dlp is up to date ({ytdlp_version()}).")
+                    except Exception as e:
+                        lines.append(f"yt-dlp: couldn't check ({clean_err(e)}).")
+                if manual or mgr.settings.get("check_app_updates", True):
+                    try:
+                        offer = app_update_available()
+                        if offer:
+                            upd["offer"] = offer
+                        elif BUILD <= 0:
+                            lines.append("This copy was built by hand, so app updates come "
+                                         "from the GitHub repo (git pull, then build.bat).")
+                        else:
+                            lines.append(f"The app is up to date ({VERSION}).")
+                    except Exception as e:
+                        lines.append(f"App: couldn't check ({clean_err(e)}).")
+                mgr.settings["last_update_check"] = time.time()
+                mgr.mark_dirty()
+            finally:
+                upd["busy"] = False
+                if manual and not upd["offer"]:
+                    upd["report"] = lines
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def daily_check():
+        if time.time() - float(mgr.settings.get("last_update_check", 0)) > 86400:
+            update_check()
+        root.after(3600 * 1000, daily_check)
+
+    def install_update(offer):
+        if any(d.status == "Downloading" for d in mgr.downloads) and not messagebox.askyesno(
+                "Update", "Downloads are running. They'll be paused and continue after the "
+                          "update. Go ahead?"):
+            return
+
+        def progress(done, total):
+            mgr.notice = (f"Downloading the update… {done * 100 // total}%" if total
+                          else f"Downloading the update… {human_size(done)}")
+
+        def work():
+            try:
+                bat, ext = prepare_app_update(progress)
+                upd["ready"] = (offer, bat, ext)
+            except Exception as e:
+                mgr.notice = f"Update failed: {clean_err(e)}"
+
+        mgr.notice = "Downloading the update…"
+        threading.Thread(target=work, daemon=True).start()
+
+    def finish_update(offer, bat, ext):
+        mgr.settings["just_updated"] = {"version": offer["version"], "extension": ext}
+        mgr.shutdown()
+        try:
+            run_app_update(bat)
+        except Exception as e:
+            mgr.settings.pop("just_updated", None)
+            mgr.save()
+            messagebox.showerror("Update", f"Couldn't start the update: {clean_err(e)}")
+            return
+        root.destroy()
+
+    def poll_updates():
+        if upd["offer"]:
+            offer, upd["offer"] = upd["offer"], None
+            if messagebox.askyesno(
+                    "Update available",
+                    f"JM Download Manager {offer['version']} (build {offer['build']}) is "
+                    f"out. You have {VERSION} (build {BUILD}).\n\nUpdate now? Your download "
+                    "list and settings are kept, and the app reopens by itself."):
+                install_update(offer)
+        if upd["report"]:
+            lines, upd["report"] = upd["report"], None
+            messagebox.showinfo("Updates", "\n".join(lines))
+        if upd["ready"]:
+            ready, upd["ready"] = upd["ready"], None
+            finish_update(*ready)
+            return
+        root.after(1000, poll_updates)
+
+    def after_update_note():
+        info = mgr.settings.pop("just_updated", None)
+        if not info:
+            return
+        mgr.mark_dirty()
+        text = f"Updated to version {VERSION}."
+        if info.get("extension"):
+            text += ("\n\nThe browser extension changed too. Open brave://extensions "
+                     "(or chrome://extensions) and click the reload arrow on "
+                     "JM Download Manager.")
+        messagebox.showinfo("Updated", text)
 
     # ---- periodic refresh ----
     tree_select = [None]
@@ -2914,6 +3245,9 @@ def run_gui(initial_url=None):
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
+    root.after(800, after_update_note)
+    root.after(8000, daily_check)
+    root.after(1000, poll_updates)
     root.after(200, refresh)
     root.after(1500, check_clipboard)
     if initial_url:

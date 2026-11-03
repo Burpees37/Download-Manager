@@ -52,6 +52,11 @@ In Chrome, Edge and Brave the extension takes a download **before the browser sa
 - **Cancel gives it back.** With *Ask before starting* on, the browser waits while the app's Add dialog is open. Press *Cancel* (or leave it for 4 minutes) and the browser downloads the file as usual.
 - If the app can't start or can't open the link, the browser keeps the download.
 
+## Updates
+- **yt-dlp updates itself** once a day in the background, so YouTube and Facebook downloads keep working without rebuilding the app. If an update ever fails to load, the app goes back to the yt-dlp built into it.
+- **The app checks for a new version** once a day and asks before installing. It downloads the new build, closes, swaps the files and opens again. Your download list and settings in `jmdm_data` are kept. If the browser extension changed, it tells you to click Reload on it.
+- Turn either off, or press **Check now**, in *Settings → Updates*. Copies built with `build.bat` only update yt-dlp; get app updates with `git pull` and `build.bat`.
+
 ## How to download…
 
 | What | How |
