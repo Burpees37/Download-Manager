@@ -2,7 +2,7 @@
 rem Builds "JM Download Manager.exe" and installs it to D:\JM-Download-Manager
 cd /d "%~dp0"
 echo Installing build tools...
-python -m pip install --upgrade pyinstaller yt-dlp || goto :nopython
+python -m pip install --upgrade pyinstaller yt-dlp certifi || goto :nopython
 python -m PyInstaller --noconfirm --onefile --windowed --name "JM Download Manager" ^
   --icon jmdm.ico --collect-submodules yt_dlp jmdm.py || goto :fail
 python -m PyInstaller --noconfirm --onefile --windowed --name jmdm-host native_host.py || goto :fail

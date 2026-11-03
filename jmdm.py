@@ -9,6 +9,8 @@ import sys
 
 
 def main():
+    from jmdm_app.net import use_bundled_certificates
+    use_bundled_certificates()
     if len(sys.argv) > 1 and sys.argv[1] == "--cli":
         from jmdm_app.cli import run_cli
         return run_cli(sys.argv[2:])

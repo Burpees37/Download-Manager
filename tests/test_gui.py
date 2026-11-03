@@ -1,6 +1,5 @@
 """Opens the real window for a few seconds and fails on any error inside it.
 Skipped where Tk or a display isn't available."""
-import os
 
 import pytest
 

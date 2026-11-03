@@ -128,11 +128,33 @@ class _UrllibResp:
 _SSL = None
 
 
+def make_ssl_context(*args, **kwargs):
+    """Windows' certificates plus the up-to-date list shipped with the app
+    (certifi). Windows only keeps the certificates it has needed before and
+    fetches others on demand, which Python can't do — without the bundled
+    list some sites (e.g. GitHub's download servers) fail with
+    CERTIFICATE_VERIFY_FAILED."""
+    import ssl
+    ctx = ssl.create_default_context(*args, **kwargs)
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except Exception:
+        pass
+    return ctx
+
+
+def use_bundled_certificates():
+    """Make every HTTPS connection in the app (urllib, http.client, yt-dlp's
+    fallbacks) use make_ssl_context. Called once at startup."""
+    import ssl
+    ssl._create_default_https_context = make_ssl_context
+
+
 def _ssl_ctx():
     global _SSL
     if _SSL is None:
-        import ssl
-        _SSL = ssl.create_default_context()
+        _SSL = make_ssl_context()
     return _SSL
 
 
