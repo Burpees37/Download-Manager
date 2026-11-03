@@ -1,0 +1,29 @@
+"""The extension's catch logic, run in Node against a fake browser."""
+import json
+import os
+import shutil
+import subprocess
+
+import pytest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+EXT = os.path.join(os.path.dirname(HERE), "extension")
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs Node.js")
+def test_extension_syntax():
+    for f in ("background.js", "content.js", "popup.js"):
+        subprocess.run(["node", "--check", os.path.join(EXT, f)], check=True)
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs Node.js")
+def test_catch_rules():
+    r = subprocess.run(["node", os.path.join(HERE, "extension_harness.mjs"),
+                        os.path.join(EXT, "background.js")],
+                       capture_output=True, text=True, timeout=60, check=True)
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    taken = "add:true,cancel,erase"
+    assert out == {"firefoxHookUnused": True, "zip": taken, "png": "suggest",
+                   "cancelled": "add:true,suggest", "alt": "suggest", "excluded": "suggest",
+                   "small": "suggest", "anyType": taken, "off": "suggest",
+                   "appDown": "suggest"}

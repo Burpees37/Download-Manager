@@ -102,6 +102,25 @@ In Chrome, Edge and Brave the extension takes a download **before the browser sa
 
 Settings and the download list are stored in `jmdm_data` next to the app.
 
+## For developers
+`jmdm.py` only starts the app; the code is in the `jmdm_app` package, one job per file:
+
+| File | What it does |
+|---|---|
+| `downloader.py` | The engine: parts, many connections, mirrors, pause/resume |
+| `net.py` | Connections kept open between parts; reading a file's size and name |
+| `gates.py` | Following gate.php-style links to the real file |
+| `video.py` | YouTube and other video sites through yt-dlp, ffmpeg conversion |
+| `series.py` | Whole seasons from a series page |
+| `manager.py` | The download list, queue, settings and saving |
+| `browser.py` | What the browser extension talks to (`/ping`, `/settings`, `/add`) |
+| `integration.py` | Lets the browser start the app |
+| `updates.py` | yt-dlp and app updates |
+| `gui.py` / `cli.py` | The window / command-line mode |
+| `config.py`, `util.py` | Shared names and small helpers |
+
+**Tests:** `pip install pytest`, then `python -m pytest`. They run a local test server and check downloads byte-for-byte (many connections, no-range hosts, pause/resume, stalled connections, mirrors), gate links, the browser hand-off, the updater and the extension's catch rules (the last needs Node.js). GitHub runs them on every push and only publishes a build when they pass.
+
 ## Extra tool: page_media_grabber.py
 `tools/page_media_grabber.py` is a standalone script for your own media server. It scans a page's HTML for `<video>`/`<source>` tags and `.m3u8`/`.mpd` links, then downloads what it finds one by one into a folder.
 

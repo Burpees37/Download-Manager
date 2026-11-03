@@ -3,3 +3,4 @@ dist/
 *.spec
 __pycache__/
 jmdm_data/
+.pytest_cache/

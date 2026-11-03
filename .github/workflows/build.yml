@@ -20,16 +20,21 @@ jobs:
           python-version: "3.12"
 
       - name: Install build tools
-        run: python -m pip install --upgrade pyinstaller yt-dlp
+        run: python -m pip install --upgrade pyinstaller yt-dlp pytest
+
+      # A build is only published when every test passes, so auto-update
+      # never hands out a broken version.
+      - name: Run tests
+        run: python -m pytest -q
 
       # The app compares this number with version.json on the Releases page
       # to know when a newer build is out.
       - name: Stamp build number
         shell: bash
         run: |
-          sed -i "s/^BUILD = 0 /BUILD = ${{ github.run_number }} /" jmdm.py
-          grep -q "^BUILD = ${{ github.run_number }} " jmdm.py
-          python -c "import re,json;s=open('jmdm.py',encoding='utf-8').read();json.dump({'version':re.search(r'VERSION = \"([^\"]+)',s).group(1),'build':${{ github.run_number }},'commit':'${{ github.sha }}'},open('version.json','w'))"
+          sed -i "s/^BUILD = 0 /BUILD = ${{ github.run_number }} /" jmdm_app/config.py
+          grep -q "^BUILD = ${{ github.run_number }} " jmdm_app/config.py
+          python -c "import re,json;s=open('jmdm_app/config.py',encoding='utf-8').read();json.dump({'version':re.search(r'VERSION = \"([^\"]+)',s).group(1),'build':${{ github.run_number }},'commit':'${{ github.sha }}'},open('version.json','w'))"
           cat version.json
 
       - name: Build exe
