@@ -15,6 +15,8 @@ from .series import fetch_html, find_cover, find_episode_media, find_episodes, p
 from .downloader import Download, RateLimiter
 from .video import VideoDownload
 from .browser import start_listener
+from .schedule import MAIN, category_of, clean_queues, default_queues, schedule_events
+import datetime
 
 class Manager:
     def __init__(self, data_dir=None, persist=True):
@@ -37,6 +39,8 @@ class Manager:
             "auto_update_ytdlp": True,
             "check_app_updates": True,
             "last_update_check": 0,
+            "queues": default_queues(),
+            "category_folders": False,     # save into Downloads\Videos, \Programs …
         }
         self.downloads = []
         self.limiter = RateLimiter()
@@ -47,6 +51,11 @@ class Manager:
         self._server = None
         if persist:
             self.load()
+        self.settings["queues"] = clean_queues(self.settings.get("queues"))
+        self.queue_running = {MAIN: True}      # other queues run when started
+        self._queue_ran = set()                # queues that started something this run
+        self.events = queue.Queue()            # ("queue_done", id) for the window
+        self._sched_last = datetime.datetime.now()
         self.apply_settings()
         self._running = True
         threading.Thread(target=self._loop, daemon=True).start()
@@ -115,8 +124,12 @@ class Manager:
     # ---- downloads -------------------------------------------------------
     def add(self, url, folder=None, filename="", connections=None, referer="",
             cookie="", user_agent="", video=None, quality=None, start=True,
-            mirrors=None, name_prefix=""):
+            mirrors=None, name_prefix="", queue=MAIN):
         url = url.strip()
+        if not folder and self.settings.get("category_folders"):
+            v = is_video_url(url) if video is None else video
+            folder = os.path.join(self.settings["download_dir"],
+                                  category_of(filename, url, v))
         folder = folder or self.settings["download_dir"]
         connections = connections or self.settings["connections"]
         if video is None:
@@ -138,6 +151,7 @@ class Manager:
             d = Download(self, url, folder, filename, connections, referer,
                          cookie, user_agent, mirrors=mlist)
         d.status = "Queued" if start else "Paused"
+        d.queue = queue if self.queue(queue) else MAIN
         with self._lock:
             self.downloads.append(d)
         self.mark_dirty()
@@ -168,10 +182,12 @@ class Manager:
         return d
 
     def add_playlist(self, url, folder=None, connections=None, quality=None,
-                     referer="", cookie="", user_agent="", items="", start=True,
+                     referer="", cookie="", user_agent="", items="", start=True, queue=MAIN,
                      done=None):
         """Expand a YouTube playlist/channel into one queued video per item.
         Runs in the background; `done(count, title, error)` is called at the end."""
+        if not folder and self.settings.get("category_folders"):
+            folder = os.path.join(self.settings["download_dir"], "Videos")
         folder = folder or self.settings["download_dir"]
         self.notice = "Reading playlist…"
 
@@ -201,7 +217,7 @@ class Manager:
                     if is_whole_playlist_url(url):
                         raise IOError(list_err or "This playlist is empty or private")
                     self.add(url, folder, "", connections, referer, cookie,
-                             user_agent, video=True, quality=quality, start=start)
+                             user_agent, video=True, quality=quality, start=start, queue=queue)
                     self.notice = "Not a playlist — downloading the single video"
                     if done:
                         done(1, "", "")
@@ -218,7 +234,7 @@ class Manager:
                     idx = e.get("playlist_index") or i
                     self.add(u, sub, e.get("title") or "", connections, referer,
                              cookie, user_agent, video=True, quality=quality,
-                             start=start, name_prefix=f"{idx:0{width}d} - ")
+                             start=start, queue=queue, name_prefix=f"{idx:0{width}d} - ")
                     count += 1
                 self.notice = f"Added {count} videos from “{title}”"
             except Exception as ex:
@@ -230,13 +246,15 @@ class Manager:
         threading.Thread(target=work, daemon=True).start()
 
     def add_series(self, url, folder=None, connections=None, quality=None,
-                   referer="", cookie="", user_agent="", items="", start=True,
+                   referer="", cookie="", user_agent="", items="", start=True, queue=MAIN,
                    links=None, done=None):
         """Whole season from a series page: find the numbered episode links,
         open each episode, find its video and queue them all, in order, into
         one folder named after the series (with its cover).
         `links` = [[href, text], ...] already read from the rendered page by
         the browser extension (works when the list is built by JavaScript)."""
+        if not folder and self.settings.get("category_folders"):
+            folder = os.path.join(self.settings["download_dir"], "Videos")
         folder = folder or self.settings["download_dir"]
         self.notice = "Reading episode list…"
 
@@ -288,13 +306,13 @@ class Manager:
                     if kind == "file":
                         ext = os.path.splitext(urllib.parse.urlsplit(media).path)[1] or ".mp4"
                         self.add(media, sub, name + ext, connections, ep_url, cookie,
-                                 user_agent, video=False, start=start)
+                                 user_agent, video=False, start=start, queue=queue)
                     else:
                         if not have_ytdlp():
                             skipped.append(n)
                             continue
                         self.add(media, sub, name, connections, ep_url, cookie, user_agent,
-                                 video=True, quality=quality, start=start)
+                                 video=True, quality=quality, start=start, queue=queue)
                     count += 1
                     time.sleep(0.2)                  # be gentle with the server
                 self.notice = (f"Added {count} episodes of “{title}”"
@@ -370,22 +388,104 @@ class Manager:
                     pass
         self.mark_dirty()
 
-    def _loop(self):
-        last_save = time.monotonic()
-        while self._running:
-            with self._lock:
-                items = list(self.downloads)
-            active = 0
-            for d in items:
-                d.update_speed()
-                if d.status in ("Downloading", "Processing"):
-                    active += 1
-            for d in items:
-                if active >= int(self.settings.get("max_active", 3)):
+    # ---- queues -----------------------------------------------------------
+    def queue(self, qid):
+        return next((q for q in self.settings["queues"] if q["id"] == qid), None)
+
+    def queue_of(self, d):
+        qid = getattr(d, "queue", MAIN)
+        return qid if self.queue(qid) else MAIN
+
+    def queue_limit(self, qid):
+        if qid == MAIN:
+            return int(self.settings.get("max_active", 3))
+        return int(self.queue(qid)["max_active"])
+
+    def start_queue(self, qid):
+        if not self.queue(qid):
+            return
+        for d in list(self.downloads):
+            if self.queue_of(d) == qid and d.status == "Paused":
+                d.status = "Queued"
+        self.queue_running[qid] = True
+        self.mark_dirty()
+
+    def stop_queue(self, qid):
+        """Stop a queue: running files go back to waiting in it."""
+        if qid == MAIN:
+            return
+        self.queue_running[qid] = False
+        for d in list(self.downloads):
+            if self.queue_of(d) == qid and d.status == "Downloading":
+                d._requeue = True
+                d.pause()
+        self.mark_dirty()
+
+    def move_to_queue(self, d, qid):
+        if self.queue(qid):
+            d.queue = qid
+            self.mark_dirty()
+
+    def delete_queue(self, qid):
+        if qid == MAIN:
+            return
+        for d in list(self.downloads):
+            if getattr(d, "queue", MAIN) == qid:
+                d.queue = MAIN
+        self.settings["queues"] = [q for q in self.settings["queues"] if q["id"] != qid]
+        self.queue_running.pop(qid, None)
+        self.mark_dirty()
+
+    def _tick_schedule(self, now=None):
+        now = now or datetime.datetime.now()
+        for qid, what in schedule_events(self.settings["queues"], self._sched_last, now):
+            if what == "start":
+                self.start_queue(qid)
+                self.notice = f"Started “{self.queue(qid)['name']}” on schedule"
+            else:
+                self.stop_queue(qid)
+                self.notice = f"Stopped “{self.queue(qid)['name']}” on schedule"
+        self._sched_last = now
+
+    def _step(self):
+        """One round of the queue: start what may start, notice finished queues."""
+        with self._lock:
+            items = list(self.downloads)
+        for d in items:
+            d.update_speed()
+            if d.status == "Paused" and getattr(d, "_requeue", False):
+                d._requeue = False                    # stopped queue: wait in it again
+                d.status = "Queued"
+        busy = ("Downloading", "Processing")
+        for q in self.settings["queues"]:
+            qid = q["id"]
+            if not self.queue_running.get(qid):
+                continue
+            mine = [d for d in items if self.queue_of(d) == qid]
+            active = sum(d.status in busy for d in mine)
+            for d in mine:
+                if active >= self.queue_limit(qid):
                     break
                 if d.status == "Queued" and not d.is_running():
                     d.start()
                     active += 1
+                    self._queue_ran.add(qid)
+            if qid != MAIN and not any(d.status in busy or d.status == "Queued"
+                                       for d in mine):
+                self.queue_running[qid] = False       # nothing left: the queue is done
+                if qid in self._queue_ran:
+                    self._queue_ran.discard(qid)
+                    self.events.put(("queue_done", qid))
+        return sum(d.status in busy for d in items)
+
+    def _loop(self):
+        last_save = time.monotonic()
+        while self._running:
+            try:
+                self._tick_schedule()
+            except Exception:
+                pass
+            active = self._step()
             now = time.monotonic()
             if (self._dirty or active) and now - last_save > 2:
                 try:

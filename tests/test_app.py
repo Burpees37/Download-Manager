@@ -7,7 +7,7 @@ import sys
 from conftest import ROOT, content
 
 MODULES = ["config", "util", "net", "gates", "updates", "integration", "series",
-           "downloader", "video", "browser", "manager", "gui", "cli"]
+           "downloader", "video", "browser", "manager", "schedule", "gui", "cli"]
 
 
 def test_every_module_imports():

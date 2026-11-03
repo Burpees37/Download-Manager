@@ -83,6 +83,7 @@ class Download:
         # extra hosts for the same file: [{"url","referer","cookie","user_agent"}]
         self.mirrors = [dict(m) for m in (mirrors or [])]
         self.status = "Queued"
+        self.queue = "main"         # which queue it waits in (see schedule.py)
         self.error = ""
         self.segments = []
         self.downloaded = 0
@@ -121,7 +122,7 @@ class Download:
                 "user_agent": self.user_agent, "mirrors": self.mirrors,
                 "status": self.status, "error": self.error, "segments": segs,
                 "downloaded": self.downloaded, "added": self.added,
-                "gate": self.gate, "post": self.post}
+                "gate": self.gate, "post": self.post, "queue": self.queue}
 
     @classmethod
     def from_dict(cls, manager, d):
@@ -141,6 +142,7 @@ class Download:
         obj.added = d.get("added", time.time())
         obj.gate = d.get("gate") or {}
         obj.post = d.get("post", "")
+        obj.queue = d.get("queue", "main")
         return obj
 
     # ---- control ---------------------------------------------------------

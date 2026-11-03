@@ -57,6 +57,19 @@ In Chrome, Edge and Brave the extension takes a download **before the browser sa
 - **The app checks for a new version** once a day and asks before installing. It downloads the new build, closes, swaps the files and opens again. Your download list and settings in `jmdm_data` are kept. If the browser extension changed, it tells you to click Reload on it.
 - Turn either off, or press **Check now**, in *Settings → Updates*. Copies built with `build.bat` only update yt-dlp; get app updates with `git pull` and `build.bat`.
 
+## The window
+The layout follows IDM: a menu bar, a big toolbar with the total speed and a speed graph, categories and queues on the left, the download list on the right, and the selected file's connections at the bottom (blue = downloaded, orange = a connection working).
+
+### Categories
+Downloads are sorted by file type into **Compressed, Programs, Videos, Music, Documents** and **Other**, plus **Unfinished** and **Finished**. Click one to see only those. To also save them into matching folders (`Downloads\Videos`, `Downloads\Programs` …), tick *Sort new downloads into category folders* in **Options**.
+
+### Queues and the scheduler
+- The **Main queue** always runs, with *Downloads at the same time* from Options.
+- Make more queues in **Scheduler** (toolbar, or *Tasks → Scheduler*), for example **Tonight**: start it at 01:00 on the days you pick, stop it at 07:00 if you like, and choose what happens when it's done: nothing, close the app, sleep, or shut down. Before closing, sleeping or shutting down you get a 60-second countdown with **Cancel**.
+- Each queue has its own *Downloads at the same time* — handy for game parts: put them in a queue that runs one or two at a time.
+- Put a download in a queue from the **Queue** box in the Add dialog, or right-click → **Move to queue**. Start or stop a queue from the toolbar's **Start queue**, the **Queues** menu or by right-clicking it in the sidebar.
+- When a queue stops, unfinished files wait in it and continue from where they were at the next start. A schedule that was missed because the PC was off or asleep doesn't fire hours late.
+
 ## How to download…
 
 | What | How |
@@ -116,10 +129,11 @@ Settings and the download list are stored in `jmdm_data` next to the app.
 | `browser.py` | What the browser extension talks to (`/ping`, `/settings`, `/add`) |
 | `integration.py` | Lets the browser start the app |
 | `updates.py` | yt-dlp and app updates |
-| `gui.py` / `cli.py` | The window / command-line mode |
+| `schedule.py` | Categories, queues and the scheduler's clock |
+| `gui.py`, `gui_widgets.py` / `cli.py` | The window and its drawn toolbar, graph and icons / command-line mode |
 | `config.py`, `util.py` | Shared names and small helpers |
 
-**Tests:** `pip install pytest`, then `python -m pytest`. They run a local test server and check downloads byte-for-byte (many connections, no-range hosts, pause/resume, stalled connections, mirrors), gate links, the browser hand-off, the updater and the extension's catch rules (the last needs Node.js). GitHub runs them on every push and only publishes a build when they pass.
+**Tests:** `pip install pytest`, then `python -m pytest`. They run a local test server and check downloads byte-for-byte (many connections, no-range hosts, pause/resume, stalled connections, mirrors), gate links, queues and the scheduler, the browser hand-off, the updater, the extension's catch rules (needs Node.js) and the window itself (opens it, runs the dialogs and fails on any error; needs a screen). GitHub runs them on every push and only publishes a build when they pass.
 
 ## Extra tool: page_media_grabber.py
 `tools/page_media_grabber.py` is a standalone script for your own media server. It scans a page's HTML for `<video>`/`<source>` tags and `.m3u8`/`.mpd` links, then downloads what it finds one by one into a folder.
