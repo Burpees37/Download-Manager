@@ -225,3 +225,58 @@ def test_add_dialog(tmp_path, monkeypatch, server):
     st = seen["downloads"]
     assert ("Paused", False, games) in st
     assert any(s == "Queued" and t and f == shows for s, t, f in st), st
+
+
+@pytest.mark.skipif(not _can_open(), reason="no display")
+def test_dialog_colours_follow_the_theme(tmp_path, monkeypatch):
+    """Dialogs (ttk) must get the theme's background, at start and after the
+    animated switch both ways. On Windows they once stayed Tk grey in dark."""
+    from tkinter import ttk
+    from jmdm_app import gui, gui_fx, manager
+    monkeypatch.setattr(manager, "app_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(gui_fx, "DURATION", 0.2)
+    real_mgr = manager.Manager.__init__
+
+    def mgr_init(self, *a, **k):
+        real_mgr(self, *a, **k)
+        self.settings.update(download_dir=str(tmp_path / "dl"), clipboard_watch=False,
+                             auto_update_ytdlp=False, check_app_updates=False,
+                             listen_port=0, theme="dark")
+    monkeypatch.setattr(manager.Manager, "__init__", mgr_init)
+    monkeypatch.setattr(gui, "Manager", manager.Manager)
+    real_loop = tk.Tk.mainloop
+    got = []
+
+    def loop(self, n=0):
+        U = gui.UI
+        th = U["theme"]
+        if not th.sv:
+            got.append("no sv_ttk")
+            self.after(100, self.destroy)
+            return real_loop(self, n)
+
+        def look(when):
+            st = ttk.Style(self)
+            want = "#1c1c1c" if th.dark else "#fafafa"
+            bg = str(st.lookup(".", "background")).lower()
+            fbg = str(st.lookup("TFrame", "background")).lower()
+            got.append((when, th.dark, bg, fbg, want, st.theme_use()))
+
+        steps = [lambda: look("start"),
+                 lambda: U["settings_dialog"](),
+                 lambda: look("options open"),
+                 lambda: [w.destroy() for w in self.winfo_children() if isinstance(w, tk.Toplevel)],
+                 lambda: U["toggle_theme"](), None, None, lambda: look("after switch to light"),
+                 lambda: U["toggle_theme"](), None, None, lambda: look("after switch to dark"),
+                 lambda: U["settings_dialog"](), lambda: look("options again")]
+        for i, f in enumerate(steps):
+            if f:
+                self.after(900 + 400 * i, f)
+        self.after(900 + 400 * len(steps) + 300, lambda: (U["mgr"].shutdown(), self.destroy()))
+        real_loop(self, n)
+    monkeypatch.setattr(tk.Tk, "mainloop", loop)
+    gui.run_gui()
+    if got == ["no sv_ttk"]:
+        pytest.skip("sv_ttk not installed")
+    bad = [g for g in got if g[2] != g[4] or g[3] != g[4]]
+    assert len(got) == 5 and not bad, got
