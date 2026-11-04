@@ -148,6 +148,14 @@ class Theme:
         if self.sv:
             try:
                 self.sv.set_theme("dark" if dark else "light", self.root)
+                # Sun Valley sets the dialog background/text colours when Tk
+                # reports <<ThemeChanged>>. On Windows that report is lost while
+                # the app is starting, so dialogs stayed Tk grey in dark mode:
+                # run its colour step directly (doing it twice is harmless).
+                try:
+                    self.root.tk.call("configure_colors")
+                except tk.TclError:
+                    pass
             except Exception:
                 self.sv = None
         if not self.sv:
