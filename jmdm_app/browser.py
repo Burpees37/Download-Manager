@@ -2,6 +2,7 @@
 import re
 import json
 import threading
+import time
 import http.server
 import http.client
 from .config import APP_NAME, DECISION_WAIT, LISTEN_PORT, VERSION
@@ -58,6 +59,7 @@ def start_listener(mgr):
 
         def do_GET(self):
             if self.path == "/ping" and self._allowed():
+                mgr.last_browser_ping = time.time()
                 return self._reply(200, {"app": APP_NAME, "version": VERSION})
             if self.path == "/settings" and self._allowed():
                 return self._reply(200, mgr.capture_settings())

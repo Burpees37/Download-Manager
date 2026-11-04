@@ -1,3 +1,4 @@
 yt-dlp
 certifi
+sv-ttk
 pyinstaller

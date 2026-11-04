@@ -1,6 +1,7 @@
-"""The app window (Tkinter), in the Classic IDM layout: menu bar, big toolbar
-with a speed graph, categories and queues on the left, the download list on
-the right, the selected file's connections below it, and a status bar."""
+"""The app window (Tkinter), modern Classic layout (mockup D): a command bar
+with the total speed, the sidebar (library, categories, queues), the download
+list with a progress bar in every row, the selected download's details card
+and a status bar. Light and dark, following Windows unless chosen in Options."""
 import os
 import re
 import time
@@ -8,22 +9,44 @@ import queue
 import threading
 import urllib.parse
 from .config import APP_NAME, BUILD, DEFAULT_CAPTURE_TYPES, MAX_CONNECTIONS, VERSION
-from .util import clean_err, default_download_dir, error_hint, short_error, find_ffmpeg, human_size, human_time, is_playlist_url, is_video_url, is_whole_playlist_url, sanitize
+from .util import clean_err, default_download_dir, error_hint, find_ffmpeg, human_size, human_time, is_playlist_url, is_video_url, is_whole_playlist_url, sanitize, short_error
 from .gates import looks_like_download
 from .updates import _ytdlp_source, app_update_available, have_ytdlp, prepare_app_update, run_app_update, update_ytdlp, ytdlp_version
 from .integration import register_browser_integration
 from .browser import decision_expired, settle
 from .manager import Manager
+from . import gdrive
 from .schedule import CATEGORY_NAMES, DAYS, MAIN, WHEN_DONE, describe, download_category, new_queue, parse_hhmm
 
-ACCENT = "#1d5fbf"
+# Filled by run_gui: the main pieces, for the window test.
+UI = {}
+
+LIBRARY = [("all", "All downloads", "grid"), ("downloading", "Downloading", "down"),
+           ("queued", "Queued & paused", "clock"), ("completed", "Completed", "check"),
+           ("failed", "Failed", "warn")]
+SORTS = [("newest", "Newest first"), ("oldest", "Oldest first"), ("name", "Name"),
+         ("size", "Size"), ("status", "Status")]
+SITE_NAMES = {"youtube.com": "YouTube", "youtu.be": "YouTube", "facebook.com": "Facebook",
+              "fb.watch": "Facebook", "tiktok.com": "TikTok", "instagram.com": "Instagram",
+              "x.com": "X", "twitter.com": "X", "vimeo.com": "Vimeo",
+              "drive.google.com": "Google Drive", "drive.usercontent.google.com": "Google Drive",
+              "docs.google.com": "Google Docs"}
+
+
+def site_name(url):
+    host = (urllib.parse.urlsplit(url or "").hostname or "").lower()
+    for k, v in SITE_NAMES.items():
+        if host == k or host.endswith("." + k):
+            return v
+    return host[4:] if host.startswith("www.") else host
 
 
 def run_gui(initial_url=None):
     import tkinter as tk
     from tkinter import ttk, messagebox, filedialog
-    from .gui_widgets import (CATEGORY_COLORS, FONT, TOOLBAR_BG, SpeedGraph, ToolButton,
-                              badge_image, folder_image, ui_scale)
+    from .gui_theme import Theme, ui_scale
+    from .gui_widgets import (CATEGORY_ICON, CommandButton, DetailsCard, DownloadList,
+                              IconButton, NavList, SpeedChip, StatusBar)
 
     if os.name == "nt":
         try:
@@ -48,33 +71,14 @@ def run_gui(initial_url=None):
     root = tk.Tk()
     root.title(f"{APP_NAME} {VERSION}")
     S = ui_scale(root)
-    root.geometry(f"{int(1180 * S)}x{int(700 * S)}")
-    root.minsize(int(820 * S), int(480 * S))
-    root.configure(bg="#ffffff")
-    style = ttk.Style()
-    for theme in ("vista", "clam"):
-        if theme in style.theme_names():
-            style.theme_use(theme)
-            break
-    style.configure("Treeview", rowheight=int(24 * S), font=FONT)
-    style.configure("Treeview.Heading", font=FONT)
-    style.configure("Side.Treeview", rowheight=int(26 * S), background="#f8f9fb",
-                    fieldbackground="#f8f9fb", borderwidth=0)
-    style.map("Treeview", background=[("selected", "#cfe0f7")],
-              foreground=[("selected", "#202124")])
-    style.map("Side.Treeview", background=[("selected", "#dce8f8")],
-              foreground=[("selected", "#202124")])
-    style.configure("Status.TLabel", background="#f4f6f9", foreground="#5f6368", font=FONT)
-
-    icon_size = max(14, int(16 * S))
-    badges = {c: badge_image(root, *CATEGORY_COLORS[c], icon_size) for c in CATEGORY_COLORS}
-    folders = {"cat": folder_image(root, "#fbd57a", "#b78a1a", icon_size),
-               "state": folder_image(root, "#c9d3e0", "#6b7a8f", icon_size),
-               "queue": folder_image(root, "#d9d2f5", "#5b3cc4", icon_size)}
+    root.geometry(f"{int(1240 * S)}x{int(760 * S)}")
+    root.minsize(int(900 * S), int(560 * S))
+    theme = Theme(root, mgr.settings.get("theme", "system"), S)
+    pad = int(16 * S)
 
     # ---- actions ---------------------------------------------------------
     def selected():
-        ids = tree.selection()
+        ids = set(lst.selection)
         return [d for d in mgr.downloads if d.id in ids]
 
     def do_resume():
@@ -122,6 +126,10 @@ def run_gui(initial_url=None):
             if os.name == "nt":
                 os.startfile(d.path)
 
+    def open_selected():
+        for d in selected()[:1]:
+            open_file(d)
+
     def open_folder(d=None):
         d = d or (selected() or [None])[0]
         folder = d.folder if d else mgr.settings["download_dir"]
@@ -139,6 +147,7 @@ def run_gui(initial_url=None):
             root.clipboard_clear()
             root.clipboard_append(sel[0].error)
             last_clip[0] = sel[0].error
+            mgr.notice = "Error message copied"
 
     def copy_url():
         sel = selected()
@@ -149,8 +158,8 @@ def run_gui(initial_url=None):
 
     def side_queue():
         """The queue picked in the sidebar, if any."""
-        s = side.selection()
-        return s[0][2:] if s and s[0].startswith("q:") and mgr.queue(s[0][2:]) else None
+        s = nav.selected
+        return s[2:] if s.startswith("q:") and mgr.queue(s[2:]) else None
 
     def new_dialog():
         """A dialog window, kept hidden until show_dialog() has placed it."""
@@ -171,48 +180,10 @@ def run_gui(initial_url=None):
             x = (win.winfo_screenwidth() - w) // 2
             y = (win.winfo_screenheight() - h) // 3
         win.geometry(f"+{x}+{y}")
+        theme.window_chrome(win)
         win.deiconify()
         win.lift()
         win.focus_force()
-
-    # ---- menu bar --------------------------------------------------------
-    menubar = tk.Menu(root)
-    m_tasks = tk.Menu(menubar, tearoff=0)
-    m_tasks.add_command(label="Add download…", accelerator="Ctrl+N",
-                        command=lambda: add_dialog())
-    m_tasks.add_command(label="Download video…", command=lambda: add_dialog(video=True))
-    m_tasks.add_separator()
-    m_tasks.add_command(label="Scheduler…", command=lambda: scheduler_dialog())
-    m_tasks.add_separator()
-    m_tasks.add_command(label="Exit", command=lambda: on_close())
-    menubar.add_cascade(label="Tasks", menu=m_tasks)
-    m_dl = tk.Menu(menubar, tearoff=0)
-    m_dl.add_command(label="Resume", command=do_resume)
-    m_dl.add_command(label="Stop", command=do_pause)
-    m_dl.add_command(label="Resume all", command=do_resume_all)
-    m_dl.add_command(label="Stop all", command=do_pause_all)
-    m_dl.add_separator()
-    m_dl.add_command(label="Redownload", command=do_redownload)
-    m_dl.add_command(label="Delete…", accelerator="Del", command=do_delete)
-    m_dl.add_command(label="Delete completed…", command=do_delete_completed)
-    m_dl.add_separator()
-    m_dl.add_command(label="Options…", command=lambda: settings_dialog())
-    menubar.add_cascade(label="Downloads", menu=m_dl)
-    m_q = tk.Menu(menubar, tearoff=0, postcommand=lambda: fill_queue_menu(m_q))
-    menubar.add_cascade(label="Queues", menu=m_q)
-    m_view = tk.Menu(menubar, tearoff=0)
-    show_details = tk.BooleanVar(value=True)
-    m_view.add_checkbutton(label="Connections panel", variable=show_details,
-                           command=lambda: toggle_details())
-    m_view.add_command(label="Open download folder", command=lambda: open_folder())
-    menubar.add_cascade(label="View", menu=m_view)
-    m_help = tk.Menu(menubar, tearoff=0)
-    m_help.add_command(label="Check for updates", command=lambda: update_check(manual=True))
-    m_help.add_command(label="About", command=lambda: messagebox.showinfo(
-        "About", f"{APP_NAME} {VERSION}" + (f" (build {BUILD})" if BUILD else "")
-        + f"\nyt-dlp {ytdlp_version() or '—'}"))
-    menubar.add_cascade(label="Help", menu=m_help)
-    root.config(menu=menubar)
 
     def fill_queue_menu(m):
         m.delete(0, "end")
@@ -228,6 +199,9 @@ def run_gui(initial_url=None):
         m.add_command(label="New queue…", command=lambda: scheduler_dialog(new=True))
         m.add_command(label="Scheduler…", command=lambda: scheduler_dialog())
 
+    def popup_under(widget, m):
+        m.tk_popup(widget.winfo_rootx(), widget.winfo_rooty() + widget.winfo_height() + 2)
+
     def queue_button():
         qid = side_queue()
         if qid and qid != MAIN:
@@ -241,111 +215,196 @@ def run_gui(initial_url=None):
             return
         m = tk.Menu(root, tearoff=0)
         fill_queue_menu(m)
-        b = tb_queue
-        m.tk_popup(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height())
+        popup_under(btn["Start queue"], m)
 
-    # ---- toolbar ---------------------------------------------------------
-    bar = tk.Frame(root, bg=TOOLBAR_BG, padx=int(8 * S), pady=int(6 * S))
-    bar.pack(fill="x")
-    tk.Frame(root, height=1, bg="#dde1e7").pack(fill="x")
-    buttons = [("Add URL", "add", "#e6effb", ACCENT, lambda: add_dialog()),
-               ("Resume", "resume", "#e5f4ea", "#127a3a", do_resume),
-               ("Stop", "stop", "#fdeceb", "#b3261e", do_pause),
-               ("Stop all", "stop_all", "#fdeceb", "#b3261e", do_pause_all),
-               ("Delete", "delete", "#f1f3f4", "#3c4043", do_delete),
-               ("Video", "video", "#fbe9ec", "#a8172e", lambda: add_dialog(video=True)),
-               ("Scheduler", "clock", "#fff3e0", "#a15c00", lambda: scheduler_dialog()),
-               ("Start queue", "queue", "#ede8fb", "#5b3cc4", lambda: queue_button()),
-               ("Options", "options", "#f1f3f4", "#3c4043", lambda: settings_dialog())]
-    tb = {}
-    for text, icon, tint, ink, cmd in buttons:
-        tb[text] = ToolButton(bar, text, icon, tint, ink, cmd, S)
-        tb[text].pack(side="left", padx=1)
-    tb_queue = tb["Start queue"]
-    graph = SpeedGraph(bar, ACCENT, S)
-    graph.pack(side="right", padx=(int(10 * S), 0))
-    sp = tk.Frame(bar, bg=TOOLBAR_BG)
-    sp.pack(side="right")
-    tk.Label(sp, text="Total speed", bg=TOOLBAR_BG, fg="#5f6368", font=FONT).pack(anchor="e")
-    speed_var = tk.StringVar(value="0 B/s")
-    tk.Label(sp, textvariable=speed_var, bg=TOOLBAR_BG, fg=ACCENT,
-             font=("Segoe UI", 15, "bold")).pack(anchor="e")
+    def more_menu():
+        m = tk.Menu(root, tearoff=0)
+        m.add_command(label="Options…", command=lambda: settings_dialog())
+        m.add_command(label="Scheduler…", command=lambda: scheduler_dialog())
+        m.add_separator()
+        m.add_command(label="Resume all", command=do_resume_all)
+        m.add_command(label="Delete completed…", command=do_delete_completed)
+        m.add_command(label="Open download folder", command=lambda: open_folder(None))
+        m.add_separator()
+        m.add_command(label="Check for updates", command=lambda: update_check(manual=True))
+        m.add_command(label="About", command=lambda: messagebox.showinfo(
+            "About", f"{APP_NAME} {VERSION}" + (f" (build {BUILD})" if BUILD else "")
+            + f"\nyt-dlp {ytdlp_version() or '—'}"))
+        m.add_separator()
+        m.add_command(label="Exit", command=lambda: on_close())
+        popup_under(btn["More"], m)
+
+    def toggle_theme():
+        mode = "light" if theme.dark else "dark"
+        mgr.settings["theme"] = mode
+        mgr.mark_dirty()
+        theme.set_mode(mode)
+        btn["Theme"].icon = "sun" if theme.dark else "moon"
+        btn["Theme"].draw()
+
+    # ---- command bar -----------------------------------------------------
+    bar = tk.Frame(root, bd=0)
+    theme.paint(bar, bg="bg")
+    bar.pack(fill="x", padx=(pad, pad), pady=(int(10 * S), int(8 * S)))
+    btn = {}
+    left_buttons = [
+        ("Add URL", "add", lambda: add_dialog(), "text", True, "Add a download (Ctrl+N)"),
+        ("Resume", "resume", do_resume, "ok", False, "Resume the selected downloads"),
+        ("Stop", "stop", do_pause, "bad", False, "Pause the selected downloads"),
+        ("Stop all", "stop_all", do_pause_all, "bad", False, "Pause everything"),
+        ("Delete", "delete", do_delete, "text", False, "Remove the selected downloads (Del)"),
+        None,
+        ("Video", "video", lambda: add_dialog(video=True), "text", False,
+         "Download a video or playlist"),
+        ("Scheduler", "clock", lambda: scheduler_dialog(), "text", False,
+         "Queues and their schedules"),
+        ("Start queue", "queue", lambda: queue_button(), "text", False,
+         "Start or stop a queue"),
+    ]
+    seps = []
+    for spec in left_buttons:
+        if spec is None:
+            sep = tk.Frame(bar, width=1, height=int(22 * S))
+            theme.paint(sep, bg="border")
+            sep.pack(side="left", padx=int(6 * S))
+            seps.append(sep)
+            continue
+        text, icon, cmd_, ink, primary, tip = spec
+        b = CommandButton(bar, theme, text, icon, cmd_, ink=ink, primary=primary, tip=tip)
+        b.pack(side="left", padx=(0, int(8 * S)) if primary else 0)
+        btn[text] = b
+    BAR_KEYS = [s[0] for s in left_buttons if s]
+    btn["More"] = IconButton(bar, theme, "options", more_menu, "More: options, updates, exit")
+    btn["More"].pack(side="right")
+    btn["Theme"] = IconButton(bar, theme, "sun" if theme.dark else "moon", toggle_theme,
+                              "Switch light / dark")
+    btn["Theme"].pack(side="right", padx=(int(4 * S), 0))
+    chip = SpeedChip(bar, theme)
+    chip.pack(side="right", padx=(0, int(4 * S)))
+
+    def fit_bar(_e=None):
+        """Narrow window: the command buttons lose their labels."""
+        cmd = [btn[k] for k in BAR_KEYS]
+        need = sum(b.natural_width(False) for b in cmd) + int(8 * S) + len(seps) * int(13 * S) \
+            + chip.winfo_reqwidth() + 2 * int(40 * S) + int(12 * S)
+        compact = bar.winfo_width() < need
+        for b in cmd:
+            b.set_compact(compact)
+
+    bar.bind("<Configure>", fit_bar)
 
     # ---- status bar (packed before the body so it stays at the bottom) ----
-    status = tk.Frame(root, bg="#f4f6f9")
+    status = StatusBar(root, theme)
     status.pack(side="bottom", fill="x")
-    tk.Frame(root, height=1, bg="#dde1e7").pack(side="bottom", fill="x")
-    status_l = tk.StringVar()
-    status_r = tk.StringVar()
-    ttk.Label(status, textvariable=status_l, style="Status.TLabel",
-              padding=(int(10 * S), int(3 * S))).pack(side="left")
-    ttk.Label(status, textvariable=status_r, style="Status.TLabel",
-              padding=(int(10 * S), int(3 * S))).pack(side="right")
 
-    # ---- body: sidebar | list -------------------------------------------
-    body = tk.PanedWindow(root, orient="horizontal", sashwidth=int(4 * S), bd=0,
-                          bg="#dde1e7", sashrelief="flat")
-    body.pack(fill="both", expand=True)
+    # ---- body: sidebar | list + details ----------------------------------
+    body = tk.Frame(root, bd=0)
+    theme.paint(body, bg="bg")
+    body.pack(fill="both", expand=True, padx=(int(10 * S), pad), pady=(0, int(10 * S)))
+    def on_nav(_iid):
+        lst.top, lst.selection = 0, []
+        refresh_now()
 
-    left = tk.Frame(body, bg="#f8f9fb")
-    side = ttk.Treeview(left, columns=("n",), show="tree", selectmode="browse",
-                        style="Side.Treeview")
-    side.column("#0", width=int(150 * S), stretch=True)
-    side.column("n", width=int(56 * S), anchor="e", stretch=False)
-    side.pack(fill="both", expand=True, padx=(int(4 * S), 0), pady=int(6 * S))
-    side.tag_configure("head", foreground="#5f6368", font=("Segoe UI", 8, "bold"))
-    side.insert("", "end", iid="cat:All", text=" All downloads", image=folders["cat"],
-                open=True)
-    for c in CATEGORY_NAMES:
-        side.insert("cat:All", "end", iid=f"cat:{c}", text=f" {c}", image=folders["cat"])
-    side.insert("", "end", iid="st:Unfinished", text=" Unfinished", image=folders["state"])
-    side.insert("", "end", iid="st:Finished", text=" Finished", image=folders["state"])
-    side.insert("", "end", iid="queues", text="QUEUES", tags=("head",), open=True)
-    side.selection_set("cat:All")
-    body.add(left, minsize=int(170 * S), width=int(230 * S))
+    nav = NavList(body, theme, on_select=on_nav, on_menu=lambda iid, e: nav_menu(iid, e))
+    nav.configure(width=int(232 * S))
+    nav.pack(side="left", fill="y", padx=(0, int(12 * S)))
+    main = tk.Frame(body, bd=0)
+    theme.paint(main, bg="bg")
+    main.pack(side="left", fill="both", expand=True)
+    details = DetailsCard(main, theme, {
+        "folder": lambda: open_folder(), "pause": do_pause, "resume": do_resume,
+        "open": open_selected, "copy_error": copy_error, "redownload": do_redownload,
+        "copy_link": copy_url})
+    details.pack(side="bottom", fill="x", pady=(int(12 * S), 0))
+    card = tk.Frame(main, bd=0, highlightthickness=1)
+    theme.paint(card, bg="surface", highlightbackground="border", highlightcolor="border")
+    card.pack(fill="both", expand=True)
 
-    right = tk.Frame(body, bg="#ffffff")
-    body.add(right, minsize=int(400 * S))
-    cols = ("size", "status", "eta", "speed", "queue", "added")
-    tree = ttk.Treeview(right, columns=cols, show="tree headings", selectmode="extended")
-    tree.heading("#0", text="File name", anchor="w")
-    tree.column("#0", width=int(300 * S), minwidth=int(160 * S), anchor="w", stretch=True)
-    for c, title, w, anchor in (("size", "Size", 76, "e"), ("status", "Status", 150, "w"),
-                                ("eta", "Time left", 72, "e"), ("speed", "Speed", 86, "e"),
-                                ("queue", "Queue", 92, "w"), ("added", "Added", 108, "w")):
-        tree.heading(c, text=title, anchor=anchor)
-        tree.column(c, width=int(w * S), minwidth=int(40 * S), anchor=anchor,
-                    stretch=(c == "status"))
-    vs = ttk.Scrollbar(right, orient="vertical", command=tree.yview)
-    tree.configure(yscrollcommand=vs.set)
-    tree.tag_configure("odd", background="#fafbfc")
-    tree.tag_configure("done", foreground="#1e6b38")
-    tree.tag_configure("err", foreground="#b3261e")
-    tree.tag_configure("wait", foreground="#5f6368")
+    header = tk.Frame(card, bd=0)
+    theme.paint(header, bg="surface")
+    header.pack(fill="x", padx=int(18 * S), pady=(int(12 * S), int(10 * S)))
+    title_var, summary_var = tk.StringVar(value="All downloads"), tk.StringVar()
+    title_lbl = theme.paint(tk.Label(header, textvariable=title_var, font=theme.f["title"], bd=0),
+                            bg="surface", fg="text")
+    title_lbl.pack(side="left")
+    summary_lbl = theme.paint(tk.Label(header, textvariable=summary_var, font=theme.f["small"],
+                                       bd=0), bg="surface", fg="muted")
+    summary_lbl.pack(side="left", padx=(int(12 * S), 0), pady=(int(4 * S), 0))
 
-    # details: the selected file's connections (IDM's segment map)
-    det = tk.Frame(right, bg="#ffffff", padx=int(10 * S), pady=int(6 * S))
-    tk.Frame(right, height=1, bg="#e5e8ed").pack(side="bottom", fill="x")
-    det.pack(side="bottom", fill="x")
-    info_var = tk.StringVar()
-    info_lbl = tk.Label(det, textvariable=info_var, bg="#ffffff", fg="#3c4043", font=FONT,
-                        anchor="w", justify="left")
-    info_lbl.pack(fill="x")
-    det.bind("<Configure>", lambda e: info_lbl.configure(wraplength=max(200, e.width - 24)))
-    seg_canvas = tk.Canvas(det, height=int(18 * S), highlightthickness=1,
-                           highlightbackground="#c6ccd5", bg="#eef1f5")
-    seg_canvas.pack(fill="x", pady=(int(4 * S), 0))
-    tk.Frame(right, height=1, bg="#e5e8ed").pack(side="bottom", fill="x")
-    vs.pack(side="right", fill="y")
-    tree.pack(side="left", fill="both", expand=True)
+    def fit_header(_e=None):
+        """Narrow window: the "10 files · 2 active" summary steps aside for the search box."""
+        need = title_lbl.winfo_reqwidth() + summary_lbl.winfo_reqwidth() + int(12 * S) \
+            + search.winfo_reqwidth() + int(8 * S) + btn["Sort"].winfo_reqwidth() + int(16 * S)
+        shown = summary_lbl.winfo_manager() == "pack"
+        if header.winfo_width() < need and shown:
+            summary_lbl.pack_forget()
+        elif header.winfo_width() >= need and not shown:
+            summary_lbl.pack(side="left", padx=(int(12 * S), 0), pady=(int(4 * S), 0),
+                             after=title_lbl)
 
-    def toggle_details():
-        if show_details.get():
-            det.pack(side="bottom", fill="x", before=vs)
+    header.bind("<Configure>", fit_header)
+
+    def sort_menu():
+        m = tk.Menu(root, tearoff=0)
+        cur = tk.StringVar(value=mgr.settings.get("sort", "newest"))
+        for key, label in SORTS:
+            m.add_radiobutton(label=label, variable=cur, value=key,
+                              command=lambda k=key: set_sort(k))
+        popup_under(btn["Sort"], m)
+
+    def set_sort(key):
+        mgr.settings["sort"] = key
+        mgr.mark_dirty()
+        btn["Sort"].text = dict(SORTS)[key]
+        btn["Sort"].draw()
+        refresh_now()
+
+    btn["Sort"] = CommandButton(header, theme, dict(SORTS).get(mgr.settings.get("sort"), "Newest first"),
+                                "chevron", sort_menu, tip="Sort the list", trailing=True)
+    btn["Sort"].pack(side="right")
+    search_v = tk.StringVar()
+    PLACEHOLDER = "Search, or paste a link and press Enter"
+    search = ttk.Entry(header, textvariable=search_v, width=34)
+    search.pack(side="right", padx=(int(14 * S), int(8 * S)))
+    hint_on = [False]
+
+    def search_hint(show):
+        if show and not search_v.get():
+            hint_on[0] = True
+            search.configure(foreground=theme.t["muted"])
+            search_v.set(PLACEHOLDER)
+        elif not show and hint_on[0]:
+            hint_on[0] = False
+            search.configure(foreground=theme.t["text"])
+            search_v.set("")
+
+    def query():
+        v = search_v.get()
+        return "" if hint_on[0] and v == PLACEHOLDER else v.strip()
+
+    def on_search_change(*_a):
+        if hint_on[0] and search_v.get() != PLACEHOLDER:       # real text arrived
+            hint_on[0] = False
+            search.configure(foreground=theme.t["text"])
+        root.after_idle(refresh_now)
+
+    def search_enter(_e=None):
+        q = query()
+        if re.match(r"^https?://\S+$", q):
+            search_v.set("")
+            add_dialog(q)
         else:
-            det.pack_forget()
+            refresh_now()
 
-    # ---- context menu ----------------------------------------------------
+    search.bind("<FocusIn>", lambda e: search_hint(False))
+    search.bind("<FocusOut>", lambda e: search_hint(True))
+    search.bind("<Return>", search_enter)
+    search.bind("<Escape>", lambda e: (search_v.set(""), lst.c.focus_set()))
+    search_v.trace_add("write", on_search_change)
+    theme.on_change(lambda: search_hint(True) if hint_on[0] or not search_v.get() else None)
+    root.after(50, lambda: search_hint(True))
+
+    # ---- context menus ---------------------------------------------------
     menu = tk.Menu(root, tearoff=0)
     move_menu = tk.Menu(menu, tearoff=0)
 
@@ -355,7 +414,7 @@ def run_gui(initial_url=None):
             move_menu.add_command(label=q["name"], command=lambda i=q["id"]: [
                 mgr.move_to_queue(d, i) for d in selected()])
 
-    menu.add_command(label="Open", command=lambda: [open_file(d) for d in selected()[:1]])
+    menu.add_command(label="Open", command=open_selected)
     menu.add_command(label="Open folder", command=lambda: open_folder())
     menu.add_separator()
     menu.add_command(label="Resume", command=do_resume)
@@ -369,42 +428,35 @@ def run_gui(initial_url=None):
     menu.add_command(label="Delete", command=do_delete)
 
     def popup(ev):
-        row = tree.identify_row(ev.y)
-        if row and row not in tree.selection():
-            tree.selection_set(row)
         fill_move_menu()
         has_err = any(d.status == "Error" for d in selected())
         menu.entryconfigure("Copy error message", state="normal" if has_err else "disabled")
         menu.tk_popup(ev.x_root, ev.y_root)
 
-    tree.bind("<Button-3>", popup)
-    tree.bind("<Double-1>", lambda e: [open_file(d) for d in selected()[:1]])
-    tree.bind("<Delete>", lambda e: do_delete())
-    root.bind("<Control-n>", lambda e: add_dialog())
-
     side_menu = tk.Menu(root, tearoff=0)
 
-    def side_popup(ev):
-        row = side.identify_row(ev.y)
-        if not (row.startswith("q:") or row == "queues"):
+    def nav_menu(iid, ev):
+        if not iid.startswith("q:"):
             return
-        if row.startswith("q:"):
-            side.selection_set(row)
+        qid = iid[2:]
         side_menu.delete(0, "end")
-        qid = row[2:] if row.startswith("q:") else None
-        if qid and qid != MAIN:
+        if qid != MAIN:
             running = mgr.queue_running.get(qid)
             side_menu.add_command(label="Stop queue" if running else "Start queue",
                                   command=lambda: mgr.stop_queue(qid) if running
                                   else mgr.start_queue(qid))
-        if qid:
-            side_menu.add_command(label="Edit / schedule…",
-                                  command=lambda: scheduler_dialog(select=qid))
+        side_menu.add_command(label="Edit / schedule…",
+                              command=lambda: scheduler_dialog(select=qid))
         side_menu.add_command(label="New queue…", command=lambda: scheduler_dialog(new=True))
         side_menu.tk_popup(ev.x_root, ev.y_root)
 
-    side.bind("<Button-3>", side_popup)
-    side.bind("<Double-1>", lambda e: side_queue() and scheduler_dialog(select=side_queue()))
+    lst = DownloadList(card, theme, on_select=lambda: refresh_details(),
+                       on_open=open_selected, on_menu=popup)
+    lst.pack(fill="both", expand=True)
+    lst.c.bind("<Delete>", lambda e: do_delete())
+    nav.bind("<Double-Button-1>", lambda e: side_queue() and scheduler_dialog(select=side_queue()))
+    root.bind("<Control-n>", lambda e: add_dialog())
+    root.bind("<Control-f>", lambda e: (search.focus_set(), "break"))
 
     # ---- dialogs ---------------------------------------------------------
     def add_mirror_dialog():
@@ -478,7 +530,7 @@ def run_gui(initial_url=None):
                                                  sticky="ew", pady=3)
         r += 1
         ttk.Label(frm, text="(leave blank to use the server's file name)",
-                  foreground="#777").grid(row=r, column=1, sticky="w")
+                  style="Hint.TLabel").grid(row=r, column=1, sticky="w")
         r += 1
         ttk.Label(frm, text="Folder:").grid(row=r, column=0, sticky="w")
         ttk.Entry(frm, textvariable=dir_v).grid(row=r, column=1, sticky="ew", pady=3)
@@ -489,7 +541,7 @@ def run_gui(initial_url=None):
         r += 1
         if mgr.settings.get("category_folders"):
             ttk.Label(frm, text="(the default folder means: sorted into its category "
-                                "folder, e.g. \\Programs)", foreground="#777"
+                                "folder, e.g. \\Programs)", style="Hint.TLabel"
                       ).grid(row=r, column=1, sticky="w")
             r += 1
         crow = ttk.Frame(frm)
@@ -517,7 +569,7 @@ def run_gui(initial_url=None):
         ttk.Label(prow, text="   Only items:").pack(side="left")
         ttk.Entry(prow, textvariable=items_v, width=14).pack(side="left")
         ttk.Label(prow, text="  e.g. 1-20 or 3,5,9 (blank = all)",
-                  foreground="#777").pack(side="left")
+                  style="Hint.TLabel").pack(side="left")
         r += 1
         season_chk = ttk.Checkbutton(
             frm, variable=season_v,
@@ -527,11 +579,12 @@ def run_gui(initial_url=None):
         r += 1
         ttk.Label(frm, text="Mirrors:").grid(row=r, column=0, sticky="nw", pady=3)
         mir_txt = tk.Text(frm, height=3, width=60, wrap="none", font=("Consolas", 9))
+        theme.style_text_widget(mir_txt)
         mir_txt.grid(row=r, column=1, columnspan=2, sticky="ew", pady=3)
         r += 1
         ttk.Label(frm, text="Optional: other links to the SAME file on other hosts, one per "
                             "line. Each host's speed adds up.",
-                  foreground="#777").grid(row=r, column=1, columnspan=2, sticky="w")
+                  style="Hint.TLabel").grid(row=r, column=1, columnspan=2, sticky="w")
         r += 1
         adv = ttk.LabelFrame(frm, text="Advanced (filled in automatically by the extension)",
                              padding=8)
@@ -597,12 +650,14 @@ def run_gui(initial_url=None):
                         video=vid_v.get(), quality=q_v.get(), start=start,
                         mirrors=mirrors, queue=qid)
             win.destroy()
-            tree_select[0] = d.id
+            pending_select[0] = d.id
 
         def on_url_change(*_):
             u = url_v.get().strip()
+            if gdrive.looks_like_file_link(u):
+                conn_v.set(min(conn_v.get() or 8, gdrive.MAX_CONNECTIONS))
             page_like = bool(re.match(r"^https?://", u)) and not is_video_url(u) \
-                and not re.search(r"\.(zip|rar|7z|exe|msi|iso|apk|mp4|mkv|webm|m3u8|mpd|mp3|pdf)"
+                and not gdrive.looks_like_file_link(u) and not re.search(r"\.(zip|rar|7z|exe|msi|iso|apk|mp4|mkv|webm|m3u8|mpd|mp3|pdf)"
                                   r"(\?|$)", urllib.parse.urlsplit(u).path + "?", re.I)
             season_chk.state(["!disabled"] if page_like else ["disabled"])
             if not page_like:
@@ -646,7 +701,7 @@ def run_gui(initial_url=None):
 
         if job is not None:
             ttk.Label(frm, text="Cancel lets the browser download it as usual.",
-                      foreground="#777").grid(row=r + 1, column=0, columnspan=3, sticky="w")
+                      style="Hint.TLabel").grid(row=r + 1, column=0, columnspan=3, sticky="w")
             win.after(1000, watch_expiry)
         ttk.Button(btns, text="Cancel", command=cancel).pack(side="left")
         win.protocol("WM_DELETE_WINDOW", cancel)
@@ -666,7 +721,8 @@ def run_gui(initial_url=None):
         frm.columnconfigure(1, weight=1)
 
         lst = tk.Listbox(frm, width=24, height=14, activestyle="none", exportselection=False,
-                         font=FONT)
+                         font=theme.f["body"], bd=0, highlightthickness=1)
+        theme.style_text_widget(lst)
         lst.grid(row=0, column=0, sticky="ns", rowspan=2)
         lb = ttk.Frame(frm)
         lb.grid(row=2, column=0, sticky="ew", pady=(6, 0))
@@ -697,7 +753,7 @@ def run_gui(initial_url=None):
         r1.grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(r1, text="Start at", variable=st_on).pack(side="left")
         ttk.Entry(r1, textvariable=st_t, width=7).pack(side="left", padx=6)
-        ttk.Label(r1, text="(24-hour, e.g. 01:30)", foreground="#777").pack(side="left")
+        ttk.Label(r1, text="(24-hour, e.g. 01:30)", style="Hint.TLabel").pack(side="left")
         dr = ttk.Frame(sch)
         dr.grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Label(dr, text="On:").pack(side="left", padx=(22, 4))
@@ -714,7 +770,7 @@ def run_gui(initial_url=None):
         ttk.Checkbutton(r2, text="Stop at", variable=sp_on).pack(side="left")
         ttk.Entry(r2, textvariable=sp_t, width=7).pack(side="left", padx=6)
         ttk.Label(r2, text="unfinished files wait for the next start",
-                  foreground="#777").pack(side="left")
+                  style="Hint.TLabel").pack(side="left")
         r3 = ttk.Frame(sch)
         r3.grid(row=4, column=0, sticky="w", pady=(10, 0))
         ttk.Label(r3, text="When the queue is done:").pack(side="left")
@@ -727,7 +783,7 @@ def run_gui(initial_url=None):
         start_b.pack(side="left")
         stop_b = ttk.Button(run, text="Stop now")
         stop_b.pack(side="left", padx=6)
-        ttk.Label(run, textvariable=state_v, foreground="#555").pack(side="left", padx=6)
+        ttk.Label(run, textvariable=state_v, style="Hint.TLabel").pack(side="left", padx=6)
         sch_widgets = [w for w in sch.winfo_children()]
 
         def set_state(widget, enabled):
@@ -947,8 +1003,16 @@ def run_gui(initial_url=None):
         s = mgr.settings
         win = new_dialog()
         win.title("Options")
-        frm = ttk.Frame(win, padding=14)
-        frm.pack(fill="both", expand=True)
+        outer = ttk.Frame(win, padding=14)
+        outer.pack(fill="both", expand=True)
+        nb = ttk.Notebook(outer)
+        nb.pack(fill="both", expand=True)
+        frm = ttk.Frame(nb, padding=14)                 # General
+        cap = ttk.Frame(nb, padding=14)                 # Browser
+        upf = ttk.Frame(nb, padding=14)                 # Updates
+        nb.add(frm, text="General")
+        nb.add(cap, text="Browser")
+        nb.add(upf, text="Updates")
         frm.columnconfigure(1, weight=1)
         dir_v = tk.StringVar(value=s["download_dir"])
         conn_v = tk.IntVar(value=s["connections"])
@@ -960,6 +1024,8 @@ def run_gui(initial_url=None):
         ask_v = tk.BooleanVar(value=s["ask_before_start"])
         catf_v = tk.BooleanVar(value=s.get("category_folders", False))
         q_v = tk.StringVar(value=s["video_quality"])
+        THEMES = {"system": "Same as Windows", "light": "Light", "dark": "Dark"}
+        theme_v = tk.StringVar(value=THEMES.get(s.get("theme", "system"), "Same as Windows"))
         cap_v = tk.BooleanVar(value=s["browser_capture"])
         types_v = tk.StringVar(value=s["capture_types"])
         min_v = tk.IntVar(value=s["capture_min_kb"])
@@ -978,6 +1044,8 @@ def run_gui(initial_url=None):
                                                     values=("best", "max", "8K", "4K",
                                                             "1440p", "1080p", "720p",
                                                             "480p", "audio"), width=8)),
+            ("Appearance:", ttk.Combobox(frm, textvariable=theme_v, state="readonly",
+                                         values=list(THEMES.values()), width=16)),
         ]
         for i, (label, widget) in enumerate(rows):
             ttk.Label(frm, text=label).grid(row=i, column=0, sticky="w", pady=3)
@@ -994,9 +1062,6 @@ def run_gui(initial_url=None):
                         variable=clip_v).grid(row=n + 1, column=0, columnspan=3, sticky="w")
         ttk.Checkbutton(frm, text="Ask before starting downloads sent from the browser",
                         variable=ask_v).grid(row=n + 2, column=0, columnspan=3, sticky="w")
-        cap = ttk.LabelFrame(frm, text="Browser downloads (same rules as the extension popup)",
-                             padding=8)
-        cap.grid(row=n + 3, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         cap.columnconfigure(1, weight=1)
         ttk.Checkbutton(cap, text="Catch downloads started in the browser",
                         variable=cap_v).grid(row=0, column=0, columnspan=3, sticky="w")
@@ -1004,7 +1069,7 @@ def run_gui(initial_url=None):
         ttk.Entry(cap, textvariable=types_v, width=60).grid(row=1, column=1, sticky="ew", pady=3)
         ttk.Button(cap, text="Default", command=lambda: types_v.set(DEFAULT_CAPTURE_TYPES)
                    ).grid(row=1, column=2, padx=(6, 0))
-        ttk.Label(cap, text="(blank = every file type)", foreground="#777"
+        ttk.Label(cap, text="(blank = every file type)", style="Hint.TLabel"
                   ).grid(row=2, column=1, sticky="w")
         ttk.Label(cap, text="Smaller than (KB):").grid(row=3, column=0, sticky="w", pady=3)
         ttk.Spinbox(cap, from_=0, to=10000000, increment=100, textvariable=min_v,
@@ -1016,10 +1081,10 @@ def run_gui(initial_url=None):
         ttk.Entry(cap, textvariable=excl_v).grid(row=5, column=1, columnspan=2, sticky="ew",
                                                  pady=3)
         ttk.Label(cap, text="Sites separated by spaces. “Every type from” starts with Google "
-                            "Drive and Docs. Hold Alt while clicking a link to skip the app once.",
-                  foreground="#777").grid(row=6, column=0, columnspan=3, sticky="w")
-        upf = ttk.LabelFrame(frm, text="Updates", padding=8)
-        upf.grid(row=n + 4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+                            "Drive and Docs.\nHold Alt while clicking a link to skip the app once. "
+                            "These are the same rules as the extension popup.",
+                  style="Hint.TLabel", justify="left").grid(row=6, column=0, columnspan=3,
+                                                            sticky="w", pady=(6, 0))
         upf.columnconfigure(0, weight=1)
         ttk.Checkbutton(upf, text="Keep yt-dlp (YouTube, Facebook…) up to date by itself",
                         variable=ytu_v).grid(row=0, column=0, sticky="w")
@@ -1029,16 +1094,16 @@ def run_gui(initial_url=None):
                    ).grid(row=0, column=1, rowspan=2, padx=(6, 0))
         build = f"build {BUILD}" if BUILD else "built by hand — app updates come from git"
         ttk.Label(upf, text=f"App {VERSION} ({build}) · yt-dlp {ytdlp_version() or '—'} "
-                            f"({_ytdlp_source[0]})", foreground="#777"
+                            f"({_ytdlp_source[0]})", style="Hint.TLabel"
                   ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ff = find_ffmpeg()
         notes = [f"Browser extension: {'listening on port ' + str(s['listen_port']) if listening else 'port busy — is another copy running?'}",
                  f"Browser can start the app: {'yes — ' if integration['ok'] else 'no — '}{integration['msg']}",
                  f"yt-dlp (video sites): {'installed' if have_ytdlp() else 'NOT installed'}",
                  f"ffmpeg (HD video + audio merge): {ff or 'not found — put ffmpeg.exe next to the app'}"]
-        ttk.Label(frm, text="\n".join(notes), foreground="#555",
-                  justify="left").grid(row=n + 5, column=0, columnspan=3, sticky="w",
-                                       pady=(10, 0))
+        ttk.Label(upf, text="\n".join(notes), style="Hint.TLabel",
+                  justify="left").grid(row=3, column=0, columnspan=2, sticky="w",
+                                       pady=(14, 0))
 
         def save():
             try:
@@ -1063,12 +1128,19 @@ def run_gui(initial_url=None):
             except Exception:
                 messagebox.showerror("Options", "Please enter whole numbers.", parent=win)
                 return
+            mode = next(k for k, v in THEMES.items() if v == theme_v.get())
+            if mode != s.get("theme", "system"):
+                s["theme"] = mode
+                theme.set_mode(mode)
+                btn["Theme"].icon = "sun" if theme.dark else "moon"
+                btn["Theme"].draw()
             mgr.apply_settings()
             win.destroy()
 
-        b = ttk.Frame(frm)
-        b.grid(row=n + 6, column=0, columnspan=3, sticky="e", pady=(12, 0))
-        ttk.Button(b, text="Save", command=save).pack(side="left", padx=4)
+        b = ttk.Frame(outer)
+        b.pack(anchor="e", pady=(12, 0))
+        ttk.Button(b, text="Save", command=save, style="Accent.TButton"
+                   if theme.sv else "TButton").pack(side="left", padx=4)
         ttk.Button(b, text="Cancel", command=win.destroy).pack(side="left")
         show_dialog(win)
 
@@ -1185,105 +1257,11 @@ def run_gui(initial_url=None):
         messagebox.showinfo("Updated", text)
 
     # ---- periodic refresh ------------------------------------------------
-    tree_select = [None]
+    pending_select = [None]
     last_clip = [None]
-    ticks = [0]
 
-    def status_text(d):
-        pct = f"{min(100.0, d.downloaded * 100 / d.size):.1f}%" \
-            if d.size and d.size > 0 else ""
-        if d.status == "Error":
-            return "Error: " + short_error(d.error)
-        if d.status == "Processing":
-            return "Merging / converting…"
-        if d.status == "Downloading":
-            if d.kind == "file" and d.size is not None and not d.resumable:
-                return (pct + " · " if pct else "") + "1 connection only"
-            return pct or (human_size(d.downloaded) if d.downloaded else "Starting…")
-        if d.status in ("Paused", "Queued") and pct and d.downloaded:
-            return f"{d.status} · {pct}"
-        return d.status
-
-    def added_text(t):
-        lt, now = time.localtime(t), time.localtime()
-        if lt[:3] == now[:3]:
-            return "Today " + time.strftime("%I:%M %p", lt).lstrip("0")
-        if time.time() - t < 2 * 86400 and lt.tm_yday == (now.tm_yday - 1) % 366:
-            return "Yesterday"
-        return time.strftime("%b %d", lt)
-
-    def draw_segments(d):
-        c = seg_canvas
-        c.delete("all")
-        w = max(1, c.winfo_width())
-        h = max(1, c.winfo_height())
-        if d is None:
-            return
-        if d.status == "Complete":
-            c.create_rectangle(0, 0, w, h, fill="#3a9a5b", outline="")
-            return
-        if d.kind == "video" or not d.size or d.size <= 0:
-            if d.size and d.size > 0:
-                c.create_rectangle(0, 0, w * d.downloaded / d.size, h,
-                                   fill=ACCENT, outline="")
-            return
-        for start, end, pos, owner in d.segments_snapshot():
-            x0 = start / d.size * w
-            x1 = pos / d.size * w
-            if x1 > x0:
-                c.create_rectangle(x0, 0, x1, h, fill=ACCENT, outline="")
-            if owner and pos <= end:
-                c.create_line(x1, 0, x1, h, fill="#ff9800", width=2)
-            c.create_line(start / d.size * w, 0, start / d.size * w, 4, fill="#555")
-
-    def matches(d, view):
-        if view == "cat:All":
-            return True
-        if view.startswith("cat:"):
-            return download_category(d) == view[4:]
-        if view == "st:Unfinished":
-            return d.status != "Complete"
-        if view == "st:Finished":
-            return d.status == "Complete"
-        if view.startswith("q:"):
-            return mgr.queue_of(d) == view[2:]
-        return True
-
-    def refresh_sidebar(items):
-        counts = {}
-        for d in items:
-            for key in ("cat:All", "cat:" + download_category(d),
-                        "st:Finished" if d.status == "Complete" else "st:Unfinished",
-                        "q:" + mgr.queue_of(d)):
-                counts[key] = counts.get(key, 0) + 1
-        for iid in ["cat:All"] + [f"cat:{c}" for c in CATEGORY_NAMES] + \
-                   ["st:Unfinished", "st:Finished"]:
-            side.set(iid, "n", counts.get(iid, 0) or "")
-        have = set(side.get_children("queues"))
-        want = []
-        for q in mgr.settings["queues"]:
-            iid = "q:" + q["id"]
-            want.append(iid)
-            running = mgr.queue_running.get(q["id"])
-            label = f" {q['name']}"
-            extra = "" if q["id"] == MAIN else (" ● running" if running else
-                                                 f" · {q['start_time']}" if q["start_enabled"]
-                                                 else "")
-            if iid in have:
-                side.item(iid, text=label + extra)
-            else:
-                side.insert("queues", "end", iid=iid, text=label + extra,
-                            image=folders["queue"])
-            side.set(iid, "n", counts.get(iid, 0) or "")
-        for iid in have - set(want):
-            if iid in side.selection():
-                side.selection_set("cat:All")
-            side.delete(iid)
-        for i, iid in enumerate(want):
-            side.move(iid, "queues", i)
-
-    def refresh():
-        # browser requests
+    def handle_incoming():
+        """Downloads sent by the browser extension."""
         while True:
             try:
                 req = mgr.incoming.get_nowait()
@@ -1309,7 +1287,7 @@ def run_gui(initial_url=None):
                     "Choose No to download it separately.") and settle(req, True):
                 mgr.add_mirror(same, req["url"], req["referer"], req["cookie"],
                                req["user_agent"])
-                tree_select[0] = same.id
+                pending_select[0] = same.id
                 continue
             if req["video"] and not req["filename"] and req.get("title") \
                     and not is_video_url(req["url"]):
@@ -1324,8 +1302,7 @@ def run_gui(initial_url=None):
                 mgr.add(req["url"], filename=req["filename"], referer=req["referer"],
                         cookie=req["cookie"], user_agent=req["user_agent"],
                         video=req["video"])
-        # finished queues
-        while True:
+        while True:                                    # finished queues
             try:
                 kind, qid = mgr.events.get_nowait()
             except queue.Empty:
@@ -1333,87 +1310,274 @@ def run_gui(initial_url=None):
             if kind == "queue_done":
                 when_done_dialog(qid)
 
-        items = list(mgr.downloads)
-        refresh_sidebar(items)
-        view = (side.selection() or ("cat:All",))[0]
-        existing = set(tree.get_children())
-        current = []
-        total_speed = 0.0
-        active = waiting = 0
-        qname = {q["id"]: q["name"] for q in mgr.settings["queues"]}
-        for d in items:
-            total_speed += d.speed
-            if d.status == "Downloading":
-                active += 1
-            elif d.status == "Queued":
-                waiting += 1
-            if not matches(d, view):
-                continue
-            current.append(d.id)
-            name = d.filename or d.url
-            if d.mirrors:
-                name = f"{name}   (+{len(d.mirrors)} mirror{'s' * (len(d.mirrors) > 1)})"
-            running = d.status == "Downloading"
-            vals = (human_size(d.size) if d.size and d.size > 0 else "",
-                    status_text(d),
-                    human_time(d.eta()) if running else "",
-                    (human_size(d.speed) + "/s") if running else "",
-                    qname.get(mgr.queue_of(d), ""),
-                    added_text(d.added))
-            tag = "done" if d.status == "Complete" else "err" if d.status == "Error" else \
-                  "wait" if d.status in ("Queued", "Paused") else ""
-            tags = tuple(t for t in (tag,) if t)
-            img = badges[download_category(d)]
-            if d.id in existing:
-                tree.item(d.id, text=" " + name, values=vals, tags=tags, image=img)
-            else:
-                tree.insert("", "end", iid=d.id, text=" " + name, values=vals, tags=tags,
-                            image=img)
-        for iid in existing - set(current):
-            tree.delete(iid)
-        for i, iid in enumerate(current):                      # keep list order + stripes
-            if tree.index(iid) != i:
-                tree.move(iid, "", i)
-            t = [x for x in tree.item(iid, "tags") if x != "odd"]
-            if i % 2:
-                t.append("odd")
-            tree.item(iid, tags=tuple(t))
-        if tree_select[0] and tree_select[0] in current:
-            tree.selection_set(tree_select[0])
-            tree.see(tree_select[0])
-            tree_select[0] = None
+    def matches(d, view):
+        st = d.status
+        if view == "all":
+            return True
+        if view == "downloading":
+            return st in ("Downloading", "Processing")
+        if view == "queued":
+            return st in ("Queued", "Paused")
+        if view == "completed":
+            return st == "Complete"
+        if view == "failed":
+            return st == "Error"
+        if view.startswith("cat:"):
+            return download_category(d) == view[4:]
+        if view.startswith("q:"):
+            return mgr.queue_of(d) == view[2:]
+        return True
 
-        sel = selected()
-        d = sel[0] if sel else None
-        if d and d.status == "Error":
-            hint = error_hint(d.error)
-            info_var.set(f"{d.filename or d.url}\nError: {d.error}"
-                         + (f"\nWhat to do: {hint}" if hint else "")
-                         + "\n(Right-click → Copy error message to send it to someone.)")
-        elif d:
-            parts = len(d.segments_snapshot())
-            hosts = 1 + len(d.mirrors)
-            info_var.set(f"{d.filename or d.url}   •   {human_size(d.downloaded)} of "
-                         f"{human_size(d.size)}   •   {d.active_conns} active connection(s)"
-                         + (f" on {d.hosts_active} host(s)" if hosts > 1 else "")
-                         + (f", {parts} part(s)" if d.kind == "file" and parts else "")
-                         + (f"   •   {hosts} host(s) total" if hosts > 1 else "")
-                         + (f"   •   {d.note}" if d.note else ""))
+    def view_title(view):
+        if view.startswith("cat:"):
+            return view[4:]
+        if view.startswith("q:"):
+            q = mgr.queue(view[2:])
+            return q["name"] if q else "Queue"
+        return dict((k, v) for k, v, _ in LIBRARY).get(view, "All downloads")
+
+    def nav_items(items):
+        t = theme.t
+        counts = {}
+        for d in items:
+            for key in ("all", "cat:" + download_category(d), "q:" + mgr.queue_of(d)):
+                counts[key] = counts.get(key, 0) + 1
+            for key, *_ in LIBRARY[1:]:
+                if matches(d, key):
+                    counts[key] = counts.get(key, 0) + 1
+        soft = {"all": (t["accent_soft"], t["accent"]), "downloading": (t["accent_soft"], t["accent"]),
+                "queued": (t["track"], t["muted"]), "completed": (t["track"], t["ok"]),
+                "failed": (t["track"], t["bad"])}
+        out = [{"head": True, "label": "Library"}]
+        for key, label, icon in LIBRARY:
+            tint, ink = soft[key]
+            out.append({"id": key, "label": label, "icon": icon, "tint": tint, "ink": ink,
+                        "count": counts.get(key, ""), "alert": key == "failed" and counts.get(key)})
+        out.append({"head": True, "label": "Categories"})
+        for c in CATEGORY_NAMES:
+            tint, ink = theme.tile(c)
+            out.append({"id": "cat:" + c, "label": c, "icon": CATEGORY_ICON[c], "tint": tint,
+                        "ink": ink, "count": counts.get("cat:" + c, "")})
+        out.append({"head": True, "label": "Queues"})
+        for q in mgr.settings["queues"]:
+            main_q = q["id"] == MAIN
+            running = mgr.queue_running.get(q["id"])
+            if main_q:
+                sub = f"{mgr.queue_limit(MAIN)} at a time"
+            elif running:
+                sub = "● running"
+            elif q["start_enabled"]:
+                sub = f"{q['start_time']}" + (f" · then {WHEN_DONE[q['when_done']].lower()}"
+                                              if q["when_done"] != "none" else "")
+            else:
+                sub = "starts when you press Start"
+            out.append({"id": "q:" + q["id"], "label": q["name"], "sub": sub,
+                        "sub_ink": t["ok"] if running else None,
+                        "icon": "queue" if main_q else "clock",
+                        "tint": t["track"] if main_q else t["queue_tint"],
+                        "ink": t["text"] if main_q else t["queue_ink"],
+                        "count": counts.get("q:" + q["id"], "")})
+        return out
+
+    def ext_label(d):
+        name = d.filename or os.path.basename(d.path or "") or ""
+        m = re.search(r"\.([A-Za-z0-9]{1,5})$", name)
+        if m:
+            return m.group(1).upper()
+        return "VID" if d.kind == "video" else "FILE"
+
+    def row_for(d, qobj):
+        st = d.status
+        running = st == "Downloading"
+        pct = (d.downloaded / d.size) if d.size and d.size > 0 else None
+        if st == "Complete":
+            pct = None
+        qid = mgr.queue_of(d)
+        row = {"id": d.id, "ext": ext_label(d), "tile": theme.tile(download_category(d)),
+               "name": d.filename or d.url, "queue": qobj["name"] if qobj else "",
+               "queue_alt": qid != MAIN, "size": human_size(d.size) if d.size and d.size > 0 else "",
+               "speed": f"{human_size(d.speed)}/s" if running else "",
+               "eta": human_time(d.eta()) if running else ""}
+        host = site_name(d.url)
+        if st == "Error":
+            row.update(sub=short_error(d.error), sub_ink="bad", pct=None,
+                       state="Failed", state_icon="warn", state_ink="bad")
+            return row
+        if st == "Complete":
+            row.update(sub=f"Saved to {d.folder}", pct=None, state="Completed",
+                       state_icon="check", state_ink="ok")
+            return row
+        if running and d.kind == "video":
+            sub = f"{host} · {getattr(d, 'quality', 'best')} quality"
+        elif running:
+            sub = f"{host} · {d.active_conns} connection{'s' * (d.active_conns != 1)}"
+            if d.mirrors:
+                sub += f" · +{len(d.mirrors)} mirror{'s' * (len(d.mirrors) > 1)}"
+            if d.size is not None and not d.resumable:
+                sub += " · server allows 1 connection"
+        elif st == "Processing":
+            sub = "Merging video and sound…"
+        elif st == "Paused":
+            sub = f"Paused · {human_size(d.downloaded)} of {human_size(d.size)}" \
+                if d.size and d.size > 0 else "Paused"
+        elif qid != MAIN and not mgr.queue_running.get(qid):
+            when = f" ({qobj['start_time']})" if qobj and qobj["start_enabled"] else ""
+            sub = f"Waits for {qobj['name'] if qobj else 'its queue'}{when}"
         else:
-            info_var.set("Select a download to see its connections. "
-                         "Blue = downloaded, orange = a connection working.")
-        draw_segments(d)
-        speed_var.set(f"{human_size(total_speed)}/s")
-        ticks[0] += 1
-        if ticks[0] % 2 == 0:
-            graph.push(total_speed)
+            sub = f"{host} · waiting for a free slot"
+        row["sub"] = sub
+        if st == "Processing":
+            row.update(pct=None, state="Merging…", state_icon="hourglass", state_ink="accent")
+        elif pct is not None and (running or (st == "Paused" and d.downloaded)):
+            row.update(pct=pct, pct_text=f"{pct * 100:.0f}%",
+                       bar="accent" if running else "paused")
+        elif running:
+            row.update(pct=None, state=human_size(d.downloaded) if d.downloaded else "Starting…",
+                       state_icon="down", state_ink="accent")
+        elif st == "Paused":
+            row.update(pct=None, state="Paused", state_icon="pause", state_ink="muted")
+        else:
+            row.update(pct=None, state="Queued", state_icon="clock", state_ink="muted")
+        return row
+
+    def details_for(sel):
+        if not sel:
+            return None
+        if len(sel) > 1:
+            total = sum(d.size for d in sel if d.size and d.size > 0)
+            done = sum(d.downloaded for d in sel)
+            return {"title": f"{len(sel)} downloads selected", "chips": [],
+                    "buttons": [("Stop", "pause", False), ("Resume", "resume", True)],
+                    "segments": [(min(1.0, done / total) if total else 0.0, False)],
+                    "stats": [("Selected", str(len(sel))), ("Total size", human_size(total)),
+                              ("Downloaded", human_size(done)),
+                              ("Speed", f"{human_size(sum(d.speed for d in sel))}/s")]}
+        d = sel[0]
+        name = d.filename or d.url
+        st = d.status
+        hosts = 1 + len(d.mirrors)
+        host_text = site_name(d.url) + (f" + {len(d.mirrors)} mirror{'s' * (hosts > 2)}"
+                                        if d.mirrors else "")
+        if st == "Error":
+            return {"title": name, "chips": [("Failed", "bad")], "error": d.error,
+                    "hint": error_hint(d.error),
+                    "buttons": [("Copy error", "copy_error", False),
+                                ("Redownload", "redownload", True)]}
+        if st == "Complete":
+            return {"title": name, "chips": [("Completed", "ok")],
+                    "buttons": [("Open folder", "folder", False), ("Open", "open", True)],
+                    "segments": [(1.0, False)], "seg_color": "ok",
+                    "stats": [("Size", human_size(d.size)), ("From", host_text),
+                              ("Added", added_text(d.added)), ("Saved to", d.folder)]}
+        chips = []
+        if d.kind == "video":
+            chips.append(("Video", "accent"))
+        elif st == "Downloading":
+            chips.append((f"{d.active_conns} connection{'s' * (d.active_conns != 1)}", "accent"))
+        if d.mirrors:
+            chips.append((f"{len(d.mirrors)} mirror{'s' * (len(d.mirrors) > 1)}", "accent"))
+        if d.note:
+            chips.append((d.note, "muted"))
+        if d.kind == "file" and d.size and d.size > 0 and d.segments_snapshot():
+            segs = []
+            for start, end, pos, owner in d.segments_snapshot()[:48]:
+                span = max(1, end - start + 1)
+                segs.append((max(0.0, min(1.0, (pos - start) / span)), bool(owner)))
+        else:
+            frac = d.downloaded / d.size if d.size and d.size > 0 else 0.0
+            segs = [(frac, st == "Downloading")]
+        running = st == "Downloading"
+        buttons = [("Open folder", "folder", False),
+                   ("Pause", "pause", True) if running or st == "Queued"
+                   else ("Resume", "resume", True)]
+        size = human_size(d.size) if d.size and d.size > 0 else "?"
+        return {"title": name, "chips": chips, "buttons": buttons, "segments": segs,
+                "stats": [("Downloaded", f"{human_size(d.downloaded)} of {size}"),
+                          ("Speed", f"{human_size(d.speed)}/s" if running else "—"),
+                          ("Time left", human_time(d.eta()) if running and d.eta() else "—"),
+                          ("Hosts", host_text), ("Saving to", d.folder)]}
+
+    def added_text(t):
+        lt, now = time.localtime(t), time.localtime()
+        if lt[:3] == now[:3]:
+            return "Today " + time.strftime("%I:%M %p", lt).lstrip("0")
+        if time.time() - t < 2 * 86400 and lt.tm_yday == (now.tm_yday - 1) % 366:
+            return "Yesterday"
+        return time.strftime("%b %d", lt)
+
+    def sort_rows(items):
+        key = mgr.settings.get("sort", "newest")
+        order = {"Downloading": 0, "Processing": 1, "Queued": 2, "Paused": 3, "Error": 4,
+                 "Complete": 5}
+        if key == "oldest":
+            return sorted(items, key=lambda d: d.added)
+        if key == "name":
+            return sorted(items, key=lambda d: (d.filename or d.url).lower())
+        if key == "size":
+            return sorted(items, key=lambda d: -(d.size or 0))
+        if key == "status":
+            return sorted(items, key=lambda d: (order.get(d.status, 9), -d.added))
+        return sorted(items, key=lambda d: -d.added)
+
+    EMPTY = {"all": ("No downloads yet", "Click Add URL, copy a link, or download something "
+                                         "in your browser."),
+             "downloading": ("Nothing is downloading", "Downloads show here while they run."),
+             "queued": ("Nothing is waiting", "Queued and paused downloads show here."),
+             "completed": ("Nothing finished yet", "Completed downloads show here."),
+             "failed": ("Nothing failed", "Good news.")}
+
+    def refresh_details():
+        details.show(details_for(selected()))
+
+    def refresh_now():
+        items = list(mgr.downloads)
+        view = nav.selected
+        if view.startswith("q:") and not mgr.queue(view[2:]):
+            view = "all"
+            nav.select(view)
+        nav.set_items(nav_items(items))
+        q = query().lower()
+        shown = [d for d in items if matches(d, view)
+                 and (not q or q in (d.filename or "").lower() or q in d.url.lower())]
+        qobj = {x["id"]: x for x in mgr.settings["queues"]}
+        rows = [row_for(d, qobj.get(mgr.queue_of(d))) for d in sort_rows(shown)]
+        empty = ("No matches", f"Nothing here matches “{q}”.") if q else \
+            EMPTY.get(view, ("Nothing here yet", ""))
+        lst.set_rows(rows, empty)
+        if pending_select[0] and pending_select[0] in lst.order:
+            lst.select(pending_select[0])
+            pending_select[0] = None
+        title_var.set(view_title(view))
+        act = sum(d.status == "Downloading" for d in shown)
+        wait = sum(d.status == "Queued" for d in shown)
+        summary_var.set(f"{len(shown)} file{'s' * (len(shown) != 1)}"
+                        + (f" · {act} active" if act else "") + (f" · {wait} queued" if wait else ""))
+        refresh_details()
+        total_speed = sum(d.speed for d in items)
+        chip.set(f"{human_size(total_speed)}/s", total_speed)
+        seen = time.time() - getattr(mgr, "last_browser_ping", 0) < 600
+        left = ["Browser connected" if seen and listening else
+                "Browser extension ready" if listening else
+                "Browser can't connect: port busy (is another copy running?)"]
+        if mgr.notice:
+            left.append(mgr.notice)
         lim = mgr.settings.get("speed_limit_kb", 0)
-        status_l.set((mgr.notice + "   •   " if mgr.notice else "")
-                     + f"{len(items)} downloads · {active} active · {waiting} queued"
-                     + (f"   •   limit {lim} KB/s" if lim else ""))
-        status_r.set(("Browser: connected" if listening else "Browser: port busy")
-                     + f"   •   Saving to {mgr.settings['download_dir']}")
-        root.after(500, refresh)
+        if lim:
+            left.append(f"Limit {lim} KB/s")
+        right = []
+        nxt = [x for x in mgr.settings["queues"] if x["id"] != MAIN and x["start_enabled"]
+               and not mgr.queue_running.get(x["id"])]
+        if nxt:
+            right.append(f"{nxt[0]['name']} starts at {nxt[0]['start_time']}")
+        right.append(f"Saving to {mgr.settings['download_dir']}")
+        status.set(left, right, ok=listening)
+
+    def refresh():
+        try:
+            handle_incoming()
+            refresh_now()
+        finally:
+            root.after(500, refresh)
 
     def check_clipboard():
         if mgr.settings.get("clipboard_watch"):
@@ -1439,13 +1603,16 @@ def run_gui(initial_url=None):
         mgr.shutdown()
         root.destroy()
 
-    side.bind("<<TreeviewSelect>>", lambda e: (side.selection() == ("queues",)
-                                               and side.selection_set("cat:All")))
+    UI.clear()
+    UI.update(root=root, mgr=mgr, theme=theme, buttons=btn, nav=nav, list=lst,
+              details=details, status=status, add_dialog=add_dialog,
+              scheduler_dialog=scheduler_dialog, settings_dialog=settings_dialog,
+              toggle_theme=toggle_theme, refresh_now=refresh_now, search=search_v)
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.after(800, after_update_note)
     root.after(8000, daily_check)
     root.after(1000, poll_updates)
-    root.after(200, refresh)
+    root.after(100, refresh)
     root.after(1500, check_clipboard)
     if initial_url:
         root.after(400, lambda: add_dialog(initial_url))

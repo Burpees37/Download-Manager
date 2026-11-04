@@ -68,7 +68,11 @@ In Chrome, Edge and Brave the extension takes a download **before the browser sa
 - Turn either off, or press **Check now**, in *Settings → Updates*. Copies built with `build.bat` only update yt-dlp; get app updates with `git pull` and `build.bat`.
 
 ## The window
-The layout follows IDM: a menu bar, a big toolbar with the total speed and a speed graph, categories and queues on the left, the download list on the right, and the selected file's connections at the bottom (blue = downloaded, orange = a connection working).
+A command bar at the top (Add URL, Resume, Stop, Stop all, Delete, Video, Scheduler, Start queue, the total speed with a graph of the last minute, light/dark, and ⋯ for Options, updates and Exit). On the left: **Library** (All, Downloading, Queued & paused, Completed, Failed), **Categories** and **Queues**, each with a count. The list shows a progress bar on every row, plus speed, time left, size and queue. Search, or paste a link into the search box and press Enter. Below the list is the selected download's card: its connections (each bar is one part: blue = downloaded, orange line = a connection working), speed, hosts and folder. If it failed, the card shows the full error and what to do about it.
+
+**Light or dark:** follows Windows by default. Switch it with the moon/sun button, or in *Options → General → Appearance*. Dialogs follow too, using the Windows 11-style Sun Valley theme.
+
+Keys: **Ctrl+N** add, **Ctrl+F** search, **Del** delete, **Enter** open, **Ctrl+A** select all, arrows to move.
 
 ### Categories
 Downloads are sorted by file type into **Compressed, Programs, Videos, Music, Documents** and **Other**, plus **Unfinished** and **Finished**. Click one to see only those. To also save them into matching folders (`Downloads\Videos`, `Downloads\Programs` …), tick *Sort new downloads into category folders* in **Options**.
@@ -140,7 +144,8 @@ Settings and the download list are stored in `jmdm_data` next to the app.
 | `integration.py` | Lets the browser start the app |
 | `updates.py` | yt-dlp and app updates |
 | `schedule.py` | Categories, queues and the scheduler's clock |
-| `gui.py`, `gui_widgets.py` / `cli.py` | The window and its drawn toolbar, graph and icons / command-line mode |
+| `gui.py`, `gui_widgets.py`, `gui_theme.py` / `cli.py` | The window, its drawn parts (command bar, sidebar, list, details card) and light/dark colours / command-line mode |
+| `gdrive.py` | Google Drive and Docs links and Drive's in-between pages |
 | `config.py`, `util.py` | Shared names and small helpers |
 
 **Tests:** `pip install pytest`, then `python -m pytest`. They run a local test server and check downloads byte-for-byte (many connections, no-range hosts, pause/resume, stalled connections, mirrors), gate links, queues and the scheduler, the browser hand-off, the updater, the extension's catch rules (needs Node.js) and the window itself (opens it, runs the dialogs and fails on any error; needs a screen). GitHub runs them on every push and only publishes a build when they pass.

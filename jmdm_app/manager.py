@@ -42,7 +42,9 @@ class Manager:
             "check_app_updates": True,
             "last_update_check": 0,
             "queues": default_queues(),
-            "category_folders": False,     # save into Downloads\Videos, \Programs …
+            "category_folders": False,
+            "theme": "system",             # system / light / dark
+            "sort": "newest",     # save into Downloads\Videos, \Programs …
         }
         self.downloads = []
         self.limiter = RateLimiter()
@@ -60,6 +62,7 @@ class Manager:
             self.settings["capture_updated"] = time.time()
         self.queue_running = {MAIN: True}      # other queues run when started
         self._queue_ran = set()                # queues that started something this run
+        self.last_browser_ping = 0.0          # when the extension last checked in
         self.events = queue.Queue()            # ("queue_done", id) for the window
         self._sched_last = datetime.datetime.now()
         self.apply_settings()
