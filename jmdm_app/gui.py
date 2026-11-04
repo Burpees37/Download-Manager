@@ -43,10 +43,11 @@ def site_name(url):
 
 def run_gui(initial_url=None):
     import tkinter as tk
-    from tkinter import ttk, messagebox, filedialog
-    from .gui_theme import Theme, ui_scale
+    from tkinter import ttk, filedialog
+    from .gui_popups import Boxes, Dropdown, PopupMenu
+    from .gui_theme import Theme, load_icon_fonts, ui_scale
     from .gui_widgets import (CATEGORY_ICON, CommandButton, DetailsCard, DownloadList,
-                              IconButton, NavList, SpeedChip, StatusBar)
+                              IconButton, NavList, SpeedChip, StatusBar, use_icon_font)
 
     if os.name == "nt":
         try:
@@ -68,12 +69,14 @@ def run_gui(initial_url=None):
 
     threading.Thread(target=_register, daemon=True).start()
 
+    load_icon_fonts()
     root = tk.Tk()
     root.title(f"{APP_NAME} {VERSION}")
     S = ui_scale(root)
     root.geometry(f"{int(1240 * S)}x{int(760 * S)}")
     root.minsize(int(900 * S), int(560 * S))
     theme = Theme(root, mgr.settings.get("theme", "system"), S)
+    use_icon_font(theme.icon)
     pad = int(16 * S)
 
     # ---- actions ---------------------------------------------------------
@@ -102,8 +105,9 @@ def run_gui(initial_url=None):
         if not sel:
             return
         ans = messagebox.askyesnocancel(
-            "Delete", f"Remove {len(sel)} item(s) from the list.\n\n"
-                      "Also delete the downloaded file(s) from disk?")
+            "Delete", f"Remove {len(sel)} download{'s' * (len(sel) > 1)} from the list.\n\n"
+                      "Also delete the downloaded file(s) from disk?",
+            yes="Remove + delete files", no="Remove from list", kind="warning")
         if ans is None:
             return
         for d in sel:
@@ -113,7 +117,8 @@ def run_gui(initial_url=None):
         done = [d for d in mgr.downloads if d.status == "Complete"]
         if done and messagebox.askyesno(
                 "Delete completed", f"Remove {len(done)} finished download(s) from the "
-                                    "list? The files stay on disk."):
+                                    "list? The files stay on disk.", yes="Remove",
+                no="Cancel"):
             for d in done:
                 threading.Thread(target=mgr.remove, args=(d, False), daemon=True).start()
 
@@ -185,6 +190,8 @@ def run_gui(initial_url=None):
         win.lift()
         win.focus_force()
 
+    messagebox = Boxes(root, theme, show_dialog)
+
     def fill_queue_menu(m):
         m.delete(0, "end")
         for q in mgr.settings["queues"]:
@@ -193,11 +200,12 @@ def run_gui(initial_url=None):
             running = mgr.queue_running.get(q["id"])
             m.add_command(label=f"{'Stop' if running else 'Start'} “{q['name']}”",
                           command=lambda i=q["id"], r=running:
-                          mgr.stop_queue(i) if r else mgr.start_queue(i))
+                          mgr.stop_queue(i) if r else mgr.start_queue(i),
+                          icon="pause_line" if running else "play_line")
         if len(mgr.settings["queues"]) > 1:
             m.add_separator()
-        m.add_command(label="New queue…", command=lambda: scheduler_dialog(new=True))
-        m.add_command(label="Scheduler…", command=lambda: scheduler_dialog())
+        m.add_command(label="New queue…", command=lambda: scheduler_dialog(new=True), icon="add")
+        m.add_command(label="Scheduler…", command=lambda: scheduler_dialog(), icon="scheduler")
 
     def popup_under(widget, m):
         m.tk_popup(widget.winfo_rootx(), widget.winfo_rooty() + widget.winfo_height() + 2)
@@ -213,25 +221,27 @@ def run_gui(initial_url=None):
                 mgr.start_queue(qid)
                 mgr.notice = f"Started “{q['name']}”"
             return
-        m = tk.Menu(root, tearoff=0)
+        m = PopupMenu(root, theme)
         fill_queue_menu(m)
         popup_under(btn["Start queue"], m)
 
     def more_menu():
-        m = tk.Menu(root, tearoff=0)
-        m.add_command(label="Options…", command=lambda: settings_dialog())
-        m.add_command(label="Scheduler…", command=lambda: scheduler_dialog())
+        m = PopupMenu(root, theme)
+        m.add_command(label="Options…", command=lambda: settings_dialog(), icon="gear")
+        m.add_command(label="Scheduler…", command=lambda: scheduler_dialog(), icon="scheduler")
         m.add_separator()
-        m.add_command(label="Resume all", command=do_resume_all)
-        m.add_command(label="Delete completed…", command=do_delete_completed)
-        m.add_command(label="Open download folder", command=lambda: open_folder(None))
+        m.add_command(label="Resume all", command=do_resume_all, icon="play_line")
+        m.add_command(label="Delete completed…", command=do_delete_completed, icon="broom")
+        m.add_command(label="Open download folder", command=lambda: open_folder(None),
+                      icon="folder")
         m.add_separator()
-        m.add_command(label="Check for updates", command=lambda: update_check(manual=True))
+        m.add_command(label="Check for updates", command=lambda: update_check(manual=True),
+                      icon="update")
         m.add_command(label="About", command=lambda: messagebox.showinfo(
             "About", f"{APP_NAME} {VERSION}" + (f" (build {BUILD})" if BUILD else "")
-            + f"\nyt-dlp {ytdlp_version() or '—'}"))
+            + f"\nyt-dlp {ytdlp_version() or '—'}"), icon="info")
         m.add_separator()
-        m.add_command(label="Exit", command=lambda: on_close())
+        m.add_command(label="Exit", command=lambda: on_close(), icon="exit")
         popup_under(btn["More"], m)
 
     def toggle_theme():
@@ -256,7 +266,7 @@ def run_gui(initial_url=None):
         None,
         ("Video", "video", lambda: add_dialog(video=True), "text", False,
          "Download a video or playlist"),
-        ("Scheduler", "clock", lambda: scheduler_dialog(), "text", False,
+        ("Scheduler", "scheduler", lambda: scheduler_dialog(), "text", False,
          "Queues and their schedules"),
         ("Start queue", "queue", lambda: queue_button(), "text", False,
          "Start or stop a queue"),
@@ -274,7 +284,7 @@ def run_gui(initial_url=None):
         b.pack(side="left", padx=(0, int(8 * S)) if primary else 0)
         btn[text] = b
     BAR_KEYS = [s[0] for s in left_buttons if s]
-    btn["More"] = IconButton(bar, theme, "options", more_menu, "More: options, updates, exit")
+    btn["More"] = IconButton(bar, theme, "more", more_menu, "More: options, updates, exit")
     btn["More"].pack(side="right")
     btn["Theme"] = IconButton(bar, theme, "sun" if theme.dark else "moon", toggle_theme,
                               "Switch light / dark")
@@ -345,7 +355,7 @@ def run_gui(initial_url=None):
     header.bind("<Configure>", fit_header)
 
     def sort_menu():
-        m = tk.Menu(root, tearoff=0)
+        m = PopupMenu(root, theme)
         cur = tk.StringVar(value=mgr.settings.get("sort", "newest"))
         for key, label in SORTS:
             m.add_radiobutton(label=label, variable=cur, value=key,
@@ -405,8 +415,8 @@ def run_gui(initial_url=None):
     root.after(50, lambda: search_hint(True))
 
     # ---- context menus ---------------------------------------------------
-    menu = tk.Menu(root, tearoff=0)
-    move_menu = tk.Menu(menu, tearoff=0)
+    menu = PopupMenu(root, theme)
+    move_menu = PopupMenu(root, theme)
 
     def fill_move_menu():
         move_menu.delete(0, "end")
@@ -414,18 +424,19 @@ def run_gui(initial_url=None):
             move_menu.add_command(label=q["name"], command=lambda i=q["id"]: [
                 mgr.move_to_queue(d, i) for d in selected()])
 
-    menu.add_command(label="Open", command=open_selected)
-    menu.add_command(label="Open folder", command=lambda: open_folder())
+    menu.add_command(label="Open", command=open_selected, icon="open", accelerator="Enter")
+    menu.add_command(label="Open folder", command=lambda: open_folder(), icon="folder")
     menu.add_separator()
-    menu.add_command(label="Resume", command=do_resume)
-    menu.add_command(label="Stop", command=do_pause)
-    menu.add_command(label="Redownload", command=do_redownload)
-    menu.add_command(label="Add mirror link…", command=lambda: add_mirror_dialog())
-    menu.add_cascade(label="Move to queue", menu=move_menu)
+    menu.add_command(label="Resume", command=do_resume, icon="play_line")
+    menu.add_command(label="Stop", command=do_pause, icon="pause_line")
+    menu.add_command(label="Redownload", command=do_redownload, icon="retry")
+    menu.add_command(label="Add mirror link…", command=lambda: add_mirror_dialog(),
+                     icon="mirror")
+    menu.add_cascade(label="Move to queue", menu=move_menu, icon="queue")
     menu.add_separator()
-    menu.add_command(label="Copy link", command=copy_url)
-    menu.add_command(label="Copy error message", command=copy_error)
-    menu.add_command(label="Delete", command=do_delete)
+    menu.add_command(label="Copy link", command=copy_url, icon="link")
+    menu.add_command(label="Copy error message", command=copy_error, icon="copy")
+    menu.add_command(label="Delete", command=do_delete, icon="delete", accelerator="Del")
 
     def popup(ev):
         fill_move_menu()
@@ -433,7 +444,7 @@ def run_gui(initial_url=None):
         menu.entryconfigure("Copy error message", state="normal" if has_err else "disabled")
         menu.tk_popup(ev.x_root, ev.y_root)
 
-    side_menu = tk.Menu(root, tearoff=0)
+    side_menu = PopupMenu(root, theme)
 
     def nav_menu(iid, ev):
         if not iid.startswith("q:"):
@@ -469,8 +480,7 @@ def run_gui(initial_url=None):
             clip = root.clipboard_get().strip()
         except Exception:
             clip = ""
-        from tkinter import simpledialog
-        u = simpledialog.askstring(
+        u = messagebox.askstring(
             "Add mirror", f"Another link to the same file:\n{d.filename}\n\n"
                           "Tip: for file hosts, just click their Download button in the "
                           "browser — the app will offer it as a mirror automatically.",
@@ -550,7 +560,7 @@ def run_gui(initial_url=None):
         ttk.Spinbox(crow, from_=1, to=MAX_CONNECTIONS, textvariable=conn_v,
                     width=6).pack(side="left", padx=(8, 18))
         ttk.Label(crow, text="Queue:").pack(side="left")
-        ttk.Combobox(crow, textvariable=queue_v, values=qnames, state="readonly",
+        Dropdown(crow, theme, textvariable=queue_v, values=qnames,
                      width=18).pack(side="left", padx=(8, 0))
         r += 1
         vrow = ttk.Frame(frm)
@@ -558,7 +568,7 @@ def run_gui(initial_url=None):
         ttk.Checkbutton(vrow, text="Video site (YouTube, Facebook…)",
                         variable=vid_v).pack(side="left")
         ttk.Label(vrow, text="   Quality:").pack(side="left")
-        ttk.Combobox(vrow, textvariable=q_v, state="readonly", width=8,
+        Dropdown(vrow, theme, textvariable=q_v, width=8,
                      values=("best", "max", "8K", "4K", "1440p", "1080p", "720p",
                              "480p", "audio")).pack(side="left")
         r += 1
@@ -774,8 +784,8 @@ def run_gui(initial_url=None):
         r3 = ttk.Frame(sch)
         r3.grid(row=4, column=0, sticky="w", pady=(10, 0))
         ttk.Label(r3, text="When the queue is done:").pack(side="left")
-        ttk.Combobox(r3, textvariable=done_v, values=list(WHEN_DONE.values()),
-                     state="readonly", width=26).pack(side="left", padx=6)
+        Dropdown(r3, theme, textvariable=done_v, values=list(WHEN_DONE.values()),
+                     width=26).pack(side="left", padx=6)
         run = ttk.Frame(form)
         run.grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 0))
         del_b = ttk.Button(lb, text="Delete")
@@ -896,7 +906,8 @@ def run_gui(initial_url=None):
                 return
             q = mgr.queue(qid)
             if not messagebox.askyesno("Delete queue", f"Delete “{q['name']}”? Its files "
-                                       "move to the main queue.", parent=win):
+                                       "move to the main queue.", parent=win,
+                                       yes="Delete queue", no="Cancel", kind="warning"):
                 return
             mgr.delete_queue(qid)
             cur["id"] = None
@@ -1040,11 +1051,11 @@ def run_gui(initial_url=None):
             ("Speed limit (KB/s, 0 = none):", ttk.Spinbox(frm, from_=0, to=1000000,
                                                           increment=100,
                                                           textvariable=lim_v, width=10)),
-            ("Default video quality:", ttk.Combobox(frm, textvariable=q_v, state="readonly",
+            ("Default video quality:", Dropdown(frm, theme, textvariable=q_v,
                                                     values=("best", "max", "8K", "4K",
                                                             "1440p", "1080p", "720p",
                                                             "480p", "audio"), width=8)),
-            ("Appearance:", ttk.Combobox(frm, textvariable=theme_v, state="readonly",
+            ("Appearance:", Dropdown(frm, theme, textvariable=theme_v,
                                          values=list(THEMES.values()), width=16)),
         ]
         for i, (label, widget) in enumerate(rows):
@@ -1197,7 +1208,7 @@ def run_gui(initial_url=None):
     def install_update(offer):
         if any(d.status == "Downloading" for d in mgr.downloads) and not messagebox.askyesno(
                 "Update", "Downloads are running. They'll be paused and continue after the "
-                          "update. Go ahead?"):
+                          "update. Go ahead?", yes="Update now", no="Not now"):
             return
 
         def progress(done, total):
@@ -1234,7 +1245,8 @@ def run_gui(initial_url=None):
                     "Update available",
                     f"JM Download Manager {offer['version']} (build {offer['build']}) is "
                     f"out. You have {VERSION} (build {BUILD}).\n\nUpdate now? Your download "
-                    "list and settings are kept, and the app reopens by itself."):
+                    "list and settings are kept, and the app reopens by itself.",
+                    yes="Update now", no="Later", kind="info"):
                 install_update(offer)
         if upd["report"]:
             lines, upd["report"] = upd["report"], None
@@ -1259,7 +1271,8 @@ def run_gui(initial_url=None):
                     f"finish — this is still {VERSION} (build {BUILD}).\n\n"
                     + (f"What happened:\n{tail}\n\n" if tail else "")
                     + "Open the download page to install it by hand? Close the app first, "
-                      "unzip over this folder and keep jmdm_data."):
+                      "unzip over this folder and keep jmdm_data.",
+                    yes="Open download page", no="Close", kind="warning"):
                 import webbrowser
                 webbrowser.open(APP_UPDATE_ZIP)
             return
@@ -1298,7 +1311,8 @@ def run_gui(initial_url=None):
                     f"This looks like the same file as\n\n  {same.filename}\n"
                     f"({human_size(same.size)})\n\nUse it as an extra mirror? Both hosts "
                     "will download it together, so their speeds add up.\n\n"
-                    "Choose No to download it separately.") and settle(req, True):
+                    "Or download it separately.", yes="Use as mirror",
+                    no="Download separately") and settle(req, True):
                 mgr.add_mirror(same, req["url"], req["referer"], req["cookie"],
                                req["user_agent"])
                 pending_select[0] = same.id
@@ -1612,7 +1626,7 @@ def run_gui(initial_url=None):
         busy = any(d.status == "Downloading" for d in mgr.downloads)
         if busy and not force and not messagebox.askyesno(
                 "Quit", "Downloads are running. They'll be paused and can be "
-                        "resumed next time. Quit?"):
+                        "resumed next time.", yes="Quit", no="Keep downloading"):
             return
         mgr.shutdown()
         root.destroy()
@@ -1621,7 +1635,9 @@ def run_gui(initial_url=None):
     UI.update(root=root, mgr=mgr, theme=theme, buttons=btn, nav=nav, list=lst,
               details=details, status=status, add_dialog=add_dialog,
               scheduler_dialog=scheduler_dialog, settings_dialog=settings_dialog,
-              toggle_theme=toggle_theme, refresh_now=refresh_now, search=search_v)
+              toggle_theme=toggle_theme, refresh_now=refresh_now, search=search_v,
+              menu=menu, more_menu=more_menu, sort_menu=sort_menu, messagebox=messagebox,
+              add_mirror_dialog=add_mirror_dialog)
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.after(800, after_update_note)
     root.after(8000, daily_check)

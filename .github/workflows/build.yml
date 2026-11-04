@@ -41,7 +41,7 @@ jobs:
         run: >
           python -m PyInstaller --noconfirm --onefile --windowed
           --name "JM Download Manager" --icon jmdm.ico
-          --collect-submodules yt_dlp --collect-data sv_ttk jmdm.py
+          --collect-submodules yt_dlp --collect-data sv_ttk --add-data "jmdm_app/icons;jmdm_app/icons" jmdm.py
 
       - name: Build browser helper (lets the extension start the app)
         run: >

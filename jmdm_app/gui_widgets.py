@@ -67,7 +67,28 @@ def rounded_rect(c, x0, y0, x1, y1, r, **kw):
     return c.create_polygon(pts, smooth=True, **kw)
 
 
+_icon_source = [None]          # Theme.icon, once a window exists
+
+
+def use_icon_font(fn):
+    _icon_source[0] = fn
+
+
 def draw_icon(c, name, x, y, size, color, bg="", width=None):
+    """An icon in the size x size box at (x, y): from the Fluent icon font when
+    it's available (smooth at any scaling), else drawn with lines."""
+    got = _icon_source[0](name, size) if _icon_source[0] else None
+    if got:
+        font, ch = got
+        c.create_text(x + size / 2, y + size / 2, text=ch, font=font, fill=color, anchor="center")
+        return
+    name = {"scheduler": "clock", "check_plain": "check", "info": "warn", "question": "warn",
+            "error": "warn", "open": "folder", "update": "retry", "exit": "delete",
+            "mirror": "copy", "move": "chevron", "pause_line": "pause", "play_line": "resume",
+            "broom": "delete", "radio_on": "check", "dot": "more", "link": "copy",
+            "dismiss": "delete", "chevron_right": "chevron"}.get(name, name)
+    if name not in ICONS:
+        return
     k = size / 24.0
     w = width or max(1.4, 1.9 * k)
     for kind, pts, filled in ICONS[name]:
@@ -387,7 +408,7 @@ class NavList(tk.Canvas):
             ts = 22 * S
             tx, ty = 12 * S, y + (h - ts) / 2
             rounded_rect(self, tx, ty, tx + ts, ty + ts, 6 * S, fill=it["tint"], outline="")
-            draw_icon(self, it["icon"], tx + 4.5 * S, ty + 4.5 * S, 13 * S, it["ink"], it["tint"],
+            draw_icon(self, it["icon"], tx + 3 * S, ty + 3 * S, 16 * S, it["ink"], it["tint"],
                       width=2 * S)
             cx = tx + ts + 10 * S
             count = str(it.get("count") or "")
@@ -707,7 +728,7 @@ class DownloadList(tk.Frame):
             c.create_text(qx + qw / 2, mid, text=label, font=f["small_bold"], fill=qi)
         if "more" in pos:
             m0, m1, _ = pos["more"]
-            draw_icon(c, "more", m1 - 22 * S, mid - 7 * S, 14 * S, t["muted"])
+            draw_icon(c, "more", m1 - 24 * S, mid - 8 * S, 16 * S, t["muted"])
 
 
 class Card(tk.Canvas):

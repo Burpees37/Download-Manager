@@ -41,6 +41,7 @@ def test_window_runs(tmp_path, monkeypatch, server):
         m = U["mgr"]
         tonight = m.settings["queues"][1]["id"]
         a = m.add(server.url("/file/a.zip?size=300000"))
+        seen["a_url"] = a.url
         m.add(server.url("/file/b.exe?size=300000"), queue=tonight)
         bad = m.add(server.url("/file/c.pdf?size=1000"), start=False)
         bad.status, bad.error = "Error", "[youtube] x: Sign in to confirm you're not a bot"
@@ -58,6 +59,36 @@ def test_window_runs(tmp_path, monkeypatch, server):
             U["list"].select(bad.id)
             seen["details"] = U["details"].info and U["details"].info.get("hint")
 
+        def menus():
+            from jmdm_app.gui_popups import Dropdown
+            menu = U["menu"]
+            U["list"].select(a.id)
+            menu.tk_popup(self.winfo_rootx() + 300, self.winfo_rooty() + 200)
+            assert menu.win is not None
+            idx = [i for i, it in enumerate(menu.items) if it.get("label") == "Copy link"][0]
+            menu._activate(idx)                                # runs it and closes
+            seen["menu_closed"] = menu.win is None
+            self.after(50, lambda: seen.setdefault("copied", self.clipboard_get()))
+            U["more_menu"]()
+            seen["more_open"] = True
+            U["sort_menu"]()                                   # opening another closes it
+            def walk(w):
+                for ch in w.winfo_children():
+                    yield ch
+                    yield from walk(ch)
+            dd = [w for w in walk(self) if isinstance(w, Dropdown) and not w.instate(["disabled"])]
+            if dd:
+                dd[0]._open()
+                dd[0].menu.close_all()
+                seen["dropdown"] = True
+
+        def box():
+            def press_enter():
+                tops = [w for w in self.winfo_children() if isinstance(w, tk.Toplevel)]
+                tops[-1].event_generate("<Return>")
+            self.after(300, press_enter)
+            seen["box"] = U["messagebox"].askyesno("Test", "Press Enter?", yes="Sure")
+
         steps = [check_rows, views,
                  lambda: U["buttons"]["Scheduler"].command(),
                  lambda: U["add_dialog"]("https://drive.google.com/file/d/"
@@ -69,6 +100,8 @@ def test_window_runs(tmp_path, monkeypatch, server):
                  lambda: U["search"].set("b.exe"),
                  lambda: seen.setdefault("search_rows", len(U["list"].rows)),
                  lambda: U["search"].set(""),
+                 menus,
+                 box,
                  lambda: m.events.put(("queue_done", tonight)),
                  lambda: [w.destroy() for w in self.winfo_children()
                           if isinstance(w, tk.Toplevel)],
@@ -82,3 +115,5 @@ def test_window_runs(tmp_path, monkeypatch, server):
     assert not errors, errors
     assert seen["rows"] == 3 and seen["dark"] is True and seen["search_rows"] == 1
     assert "signed-in browser" in seen["details"]
+    assert seen["menu_closed"] and seen["copied"] == seen["a_url"]
+    assert seen.get("dropdown") and seen["box"] is True

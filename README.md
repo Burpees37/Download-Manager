@@ -70,6 +70,8 @@ In Chrome, Edge and Brave the extension takes a download **before the browser sa
 ## The window
 A command bar at the top (Add URL, Resume, Stop, Stop all, Delete, Video, Scheduler, Start queue, the total speed with a graph of the last minute, light/dark, and ⋯ for Options, updates and Exit). On the left: **Library** (All, Downloading, Queued & paused, Completed, Failed), **Categories** and **Queues**, each with a count. The list shows a progress bar on every row, plus speed, time left, size and queue. Search, or paste a link into the search box and press Enter. Below the list is the selected download's card: its connections (each bar is one part: blue = downloaded, orange line = a connection working), speed, hosts and folder. If it failed, the card shows the full error and what to do about it.
 
+Menus, dropdowns and message boxes are the app's own, so they match in light and dark too. Icons are Microsoft's [Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons) (MIT licence, notice in `jmdm_app/icons`), packed into a tiny font by `tools/make_icon_font.py`.
+
 **Light or dark:** follows Windows by default. Switch it with the moon/sun button, or in *Options → General → Appearance*. Dialogs follow too, using the Windows 11-style Sun Valley theme.
 
 Keys: **Ctrl+N** add, **Ctrl+F** search, **Del** delete, **Enter** open, **Ctrl+A** select all, arrows to move.

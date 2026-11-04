@@ -37,6 +37,22 @@ TILES = {
 }
 
 
+ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
+
+
+def load_icon_fonts():
+    """Make the app's icon fonts (Fluent UI System Icons) usable by this
+    process only — nothing is installed. Call before creating the window."""
+    if os.name != "nt":
+        return                                   # elsewhere: installed fonts, or drawn icons
+    try:
+        import ctypes
+        for f in ("jmdm-icons-regular.ttf", "jmdm-icons-filled.ttf"):
+            ctypes.windll.gdi32.AddFontResourceExW(os.path.join(ICON_DIR, f), 0x10, 0)
+    except Exception:
+        pass
+
+
 def ui_scale(root):
     """1.0 at 100 % Windows scaling, 1.5 at 150 % …"""
     try:
@@ -78,6 +94,10 @@ class Theme:
                      if f in fams), tkfont.nametofont("TkDefaultFont").actual("family"))
         disp = next((f for f in ("Segoe UI Variable Display", base) if f in fams), base)
         self.family = base
+        from .icon_map import FAMILY, ICONS
+        self.icon_codes = ICONS
+        self.icon_family = FAMILY if all(f in fams for f in FAMILY.values()) else None
+        self._icon_fonts = {}
         self.f = {
             "body": tkfont.Font(root, family=base, size=10),
             "bold": tkfont.Font(root, family=base, size=10, weight="bold"),
@@ -91,6 +111,17 @@ class Theme:
 
     def wants_dark(self):
         return self.mode == "dark" or (self.mode == "system" and system_prefers_dark())
+
+    def icon(self, name, px):
+        """(font, character) for an icon at px pixels, or None to draw it by hand."""
+        if not self.icon_family or name not in self.icon_codes:
+            return None
+        style, cp = self.icon_codes[name]
+        key = (style, int(round(px)))
+        if key not in self._icon_fonts:
+            self._icon_fonts[key] = tkfont.Font(self.root, family=self.icon_family[style],
+                                                size=-max(8, key[1]))
+        return self._icon_fonts[key], chr(cp)
 
     # ---- registration ---------------------------------------------------
     def paint(self, widget, **tokens):
@@ -130,6 +161,13 @@ class Theme:
         style.configure("Bad.TLabel", foreground=self.t["bad"])
         style.configure("Head.TLabel", font=self.f["big"])
         self.root.configure(bg=self.t["bg"])
+        # the lists that drop open from dropdowns (Queue, Quality, Appearance …)
+        t = self.t
+        for opt, val in (("background", t["surface"]), ("foreground", t["text"]),
+                         ("selectBackground", t["accent"]), ("selectForeground", t["on_accent"]),
+                         ("font", self.f["body"]), ("borderWidth", 0),
+                         ("highlightThickness", 0), ("activeStyle", "none")):
+            self.root.option_add(f"*TCombobox*Listbox.{opt}", val)
         self.window_chrome(self.root)
         alive = []
         for w, tokens in self._painted:
