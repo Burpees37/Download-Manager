@@ -1,7 +1,7 @@
 """Names, versions and fixed settings used across the app."""
 
 APP_NAME = "JM Download Manager"
-VERSION = "1.10.0"
+VERSION = "1.10.1"
 BUILD = 0          # set by the GitHub build (run number); 0 = built by hand
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")

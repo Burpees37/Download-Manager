@@ -169,6 +169,35 @@ def _manifest_version(folder):
         return ""
 
 
+def _log(msg):
+    """One line in jmdm_data/update.log (the swap script appends to it too)."""
+    import datetime
+    try:
+        folder = os.path.join(app_dir(), "jmdm_data")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "update.log"), "a", encoding="ascii",
+                  errors="replace") as fh:
+            fh.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {msg}\n")
+    except OSError:
+        pass
+
+
+def log_started():
+    """Called by the app after an update restarted it."""
+    _log(f"app started: {VERSION} (build {BUILD})")
+
+
+def _in_job():
+    try:
+        import ctypes
+        res = ctypes.c_int(0)
+        k = ctypes.windll.kernel32
+        k.IsProcessInJob(k.GetCurrentProcess(), None, ctypes.byref(res))
+        return bool(res.value)
+    except Exception:
+        return None
+
+
 def prepare_app_update(progress=lambda done, total: None, pid=None):
     """Download and unpack the new build, then write a script that swaps the
     files once this app has closed and starts it again. Returns
@@ -180,6 +209,7 @@ def prepare_app_update(progress=lambda done, total: None, pid=None):
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
     zpath = os.path.join(work, "update.zip")
+    _log(f"---- update from {VERSION} (build {BUILD}), app in {here}")
     with _get(APP_UPDATE_ZIP, timeout=60) as r, open(zpath, "wb") as fh:
         total = int(r.headers.get("Content-Length") or 0)
         done = 0
@@ -194,7 +224,9 @@ def prepare_app_update(progress=lambda done, total: None, pid=None):
     with zipfile.ZipFile(zpath) as zf:
         zf.extractall(new)
     if not os.path.isfile(os.path.join(new, APP_NAME + ".exe")):
+        _log("the downloaded update is missing the app")
         raise ValueError("the update is missing the app")
+    _log(f"downloaded {done // 1048576} MB and unpacked it to {new}")
     ext_changed = _manifest_version(new) != _manifest_version(here)
     exe = os.path.join(here, APP_NAME + ".exe")
     bat = os.path.join(work, "update.bat")
@@ -214,20 +246,30 @@ def prepare_app_update(progress=lambda done, total: None, pid=None):
         'tasklist /FI "PID eq %PID%" /NH 2>nul | find /i ".exe" >nul || goto closed',
         "set /a W+=1",
         f"if %W% lss 90 ({wait1} & goto wait)",
-        "echo the app was still running after 90 s >> %LOG%",
+        # it saved everything before closing; something kept it open: end it
+        "echo the app was still running after 90 s - ending it >> %LOG%",
+        "taskkill /F /PID %PID% >> %LOG% 2>&1",
         ":closed",
+        "echo the app has closed >> %LOG%",
         f"{wait1}",                                   # let the launcher process finish too
     ]
     files = sorted(f for f in os.listdir(new) if os.path.isfile(os.path.join(new, f)))
+    err = os.path.join(work, "copy-error.txt")
+    ours = (APP_NAME + ".exe", "jmdm-host.exe")       # safe to end if still running
     for i, f in enumerate(files):
         src, dst = os.path.join(new, f), os.path.join(here, f)
         # retry: the app's launcher, the browser helper or ffmpeg may still be closing
         lines += ["set N=0",
                   f":copy{i}",
-                  f'copy /y "{src}" "{here}" >nul && goto next{i}',
-                  "set /a N+=1",
-                  f"if %N% lss 60 ({wait1} & goto copy{i})",
-                  f'echo FAILED to replace {f} (still in use?) >> %LOG%',
+                  f'copy /y "{src}" "{here}" >nul 2>"{err}" && goto next{i}',
+                  "set /a N+=1"]
+        if f in ours:
+            lines.append(f'if %N% equ 20 (echo {f} still in use - ending it >> %LOG% '
+                         f'& taskkill /F /IM "{f}" >> %LOG% 2>&1)')
+        lines += [f"if %N% lss 60 ({wait1} & goto copy{i})",
+                  f'echo FAILED to replace {f}: >> %LOG%',
+                  f'type "{err}" >> %LOG% 2>nul',
+                  f'tasklist /FI "IMAGENAME eq {f}" >> %LOG% 2>&1',
                   f"goto done{i}",
                   f":next{i}",
                   (f'fc /b "{src}" "{dst}" >nul && echo replaced {f} >> %LOG% '
@@ -252,11 +294,16 @@ def run_app_update(bat):
     # script need a console. Break away from any job the app runs in (e.g. when
     # the browser started it), so closing the app can't take the script with it.
     flags = 0x08000000 | 0x00000200                # CREATE_NO_WINDOW | NEW_PROCESS_GROUP
+    job = _in_job()
     try:
-        subprocess.Popen(["cmd", "/c", bat], creationflags=flags | 0x01000000,
-                         close_fds=True)
-    except OSError:
-        subprocess.Popen(["cmd", "/c", bat], creationflags=flags, close_fds=True)
+        p = subprocess.Popen(["cmd", "/c", bat], creationflags=flags | 0x01000000,
+                             close_fds=True)
+        how = "outside the app's job" if job else "normally"
+    except OSError as e:
+        _log(f"couldn't start the script outside the app's job ({e}); starting it inside")
+        p = subprocess.Popen(["cmd", "/c", bat], creationflags=flags, close_fds=True)
+        how = "inside the app's job"
+    _log(f"started the swap script {how} (pid {p.pid}); the app now closes")
 
 
 def update_log_tail(lines=12):

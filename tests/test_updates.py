@@ -161,7 +161,8 @@ def test_app_update_really_swaps_files(isolated, server, monkeypatch):
                 break
             time.sleep(0.5)
         text = log.read_text(errors="replace") if log.exists() else "(no log)"
-        assert "starting the app" in text, text
+        assert "starting the app" in text and "the app has closed" in text, text
+        assert "started the swap script" in text and "downloaded" in text, text
         assert running.poll() is not None, "copied while the app was still running"
         new = open(new_exe, "rb").read()
         assert exe.read_bytes() == new, text
