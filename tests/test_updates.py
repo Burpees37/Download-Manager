@@ -122,3 +122,54 @@ def test_app_update(isolated, server, monkeypatch):
     risky = [ln for ln in script.splitlines()
              if re.search(r"\b(copy|xcopy|move|del|rd|rmdir)\b", ln, re.I) and "jmdm_data" in ln]
     assert not risky, risky
+
+
+@pytest.mark.skipif(os.name != "nt", reason="runs the real update script (Windows)")
+def test_app_update_really_swaps_files(isolated, server, monkeypatch):
+    """End to end on Windows: the "app" is still running and its .exe locked
+    while the script starts; the script must wait, replace the files, verify
+    them and start the new copy."""
+    import shutil
+    import subprocess
+    import time
+    sysdir = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    old_exe, new_exe = os.path.join(sysdir, "PING.EXE"), os.path.join(sysdir, "HOSTNAME.EXE")
+    app = isolated
+    os.makedirs(app / "jmdm_data")
+    (app / "jmdm_data" / "settings.json").write_text('{"keep": 1}')
+    exe = app / "JM Download Manager.exe"
+    shutil.copy(old_exe, exe)
+    shutil.copy(old_exe, app / "jmdm-host.exe")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.write(new_exe, "JM Download Manager.exe")
+        z.write(new_exe, "jmdm-host.exe")
+        z.writestr("README.md", "new")
+        z.writestr("extension/manifest.json", json.dumps({"version": "2.0.0"}))
+    server.httpd.blobs["zip"] = buf.getvalue()
+    monkeypatch.setattr(updates, "APP_UPDATE_ZIP", server.url("/blob?b=zip"))
+    # the running app: holds its .exe open for ~6 s
+    running = subprocess.Popen([str(exe), "-n", "7", "127.0.0.1"], stdout=subprocess.DEVNULL,
+                               creationflags=0x08000000)
+    try:
+        bat, _ = updates.prepare_app_update(pid=running.pid)
+        updates.run_app_update(bat)
+        log = app / "jmdm_data" / "update.log"
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            if log.exists() and "starting the app" in log.read_text(errors="replace"):
+                break
+            time.sleep(0.5)
+        text = log.read_text(errors="replace") if log.exists() else "(no log)"
+        assert "starting the app" in text, text
+        assert running.poll() is not None, "copied while the app was still running"
+        new = open(new_exe, "rb").read()
+        assert exe.read_bytes() == new, text
+        assert (app / "jmdm-host.exe").read_bytes() == new, text
+        assert (app / "README.md").read_text() == "new"
+        assert json.loads((app / "extension" / "manifest.json").read_text())["version"] == "2.0.0"
+        assert (app / "jmdm_data" / "settings.json").read_text() == '{"keep": 1}'
+        assert "FAILED" not in text, text
+    finally:
+        if running.poll() is None:
+            running.kill()

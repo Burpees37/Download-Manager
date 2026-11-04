@@ -169,7 +169,7 @@ def _manifest_version(folder):
         return ""
 
 
-def prepare_app_update(progress=lambda done, total: None):
+def prepare_app_update(progress=lambda done, total: None, pid=None):
     """Download and unpack the new build, then write a script that swaps the
     files once this app has closed and starts it again. Returns
     (script path, extension_changed). jmdm_data (list, settings) is untouched."""
@@ -207,7 +207,7 @@ def prepare_app_update(progress=lambda done, total: None):
         "@echo off",
         f'set LOG="{log}"',
         f'echo [%date% %time%] Updating {here} >> %LOG%',
-        f"set PID={os.getpid()}",
+        f"set PID={pid or os.getpid()}",
         "set W=0",
         ":wait",
         # tasklist names the .exe only while that exact process still runs
