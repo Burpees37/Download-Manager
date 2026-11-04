@@ -11,7 +11,7 @@ import urllib.parse
 from .config import APP_NAME, BUILD, DEFAULT_CAPTURE_TYPES, MAX_CONNECTIONS, VERSION
 from .util import clean_err, default_download_dir, error_hint, find_ffmpeg, human_size, human_time, is_playlist_url, is_video_url, is_whole_playlist_url, sanitize, short_error
 from .gates import looks_like_download
-from .updates import _ytdlp_source, app_update_available, have_ytdlp, prepare_app_update, run_app_update, update_ytdlp, ytdlp_version
+from .updates import APP_UPDATE_ZIP, _ytdlp_source, update_log_tail, app_update_available, have_ytdlp, prepare_app_update, run_app_update, update_ytdlp, ytdlp_version
 from .integration import register_browser_integration
 from .browser import decision_expired, settle
 from .manager import Manager
@@ -1215,7 +1215,8 @@ def run_gui(initial_url=None):
         threading.Thread(target=work, daemon=True).start()
 
     def finish_update(offer, bat, ext):
-        mgr.settings["just_updated"] = {"version": offer["version"], "extension": ext}
+        mgr.settings["just_updated"] = {"version": offer["version"], "build": offer["build"],
+                                        "extension": ext}
         mgr.shutdown()
         try:
             run_app_update(bat)
@@ -1249,6 +1250,19 @@ def run_gui(initial_url=None):
         if not info:
             return
         mgr.mark_dirty()
+        if BUILD and info.get("build") and BUILD < int(info["build"]):
+            # still the old copy: the file swap didn't happen
+            tail = update_log_tail()
+            if messagebox.askyesno(
+                    "Update didn't finish",
+                    f"The update to {info.get('version')} (build {info['build']}) didn't "
+                    f"finish — this is still {VERSION} (build {BUILD}).\n\n"
+                    + (f"What happened:\n{tail}\n\n" if tail else "")
+                    + "Open the download page to install it by hand? Close the app first, "
+                      "unzip over this folder and keep jmdm_data."):
+                import webbrowser
+                webbrowser.open(APP_UPDATE_ZIP)
+            return
         text = f"Updated to version {VERSION}."
         if info.get("extension"):
             text += ("\n\nThe browser extension changed too. Open brave://extensions "

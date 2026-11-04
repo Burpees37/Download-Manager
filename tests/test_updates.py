@@ -1,5 +1,6 @@
 """yt-dlp self-update and the app's self-update, against a fake release."""
 import io
+import re
 import json
 import os
 import sys
@@ -112,4 +113,12 @@ def test_app_update(isolated, server, monkeypatch):
     assert f"set PID={os.getpid()}" in script
     assert 'find /i ".exe"' in script                        # exact-process wait
     assert script.count("copy /y") == 3 and "xcopy" in script
-    assert "jmdm_data" not in script                         # never touches your list
+    # Waits must work without a console: "timeout" quits at once there, which
+    # made the old script give up before the app had closed (update did nothing).
+    assert "timeout" not in script and script.count("ping -n 2 127.0.0.1") >= 3
+    assert "update.log" in script and 'fc /b' in script        # logged and verified
+    assert script.index(":closed") < script.index("copy /y")    # waits before copying
+    # never copies over, moves or deletes your list/settings (only appends the log)
+    risky = [ln for ln in script.splitlines()
+             if re.search(r"\b(copy|xcopy|move|del|rd|rmdir)\b", ln, re.I) and "jmdm_data" in ln]
+    assert not risky, risky

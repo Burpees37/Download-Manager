@@ -198,31 +198,49 @@ def prepare_app_update(progress=lambda done, total: None):
     ext_changed = _manifest_version(new) != _manifest_version(here)
     exe = os.path.join(here, APP_NAME + ".exe")
     bat = os.path.join(work, "update.bat")
+    log = os.path.join(here, "jmdm_data", "update.log")
+    # Waits use "ping", not "timeout": timeout quits at once when the script has
+    # no console ("Input redirection is not supported"), which made the old
+    # script skip its waits and try to replace the app while it was still open.
+    wait1 = "ping -n 2 127.0.0.1 >nul"
     lines = [
         "@echo off",
+        f'set LOG="{log}"',
+        f'echo [%date% %time%] Updating {here} >> %LOG%',
         f"set PID={os.getpid()}",
         "set W=0",
         ":wait",
         # tasklist names the .exe only while that exact process still runs
         'tasklist /FI "PID eq %PID%" /NH 2>nul | find /i ".exe" >nul || goto closed',
         "set /a W+=1",
-        "if %W% lss 60 (timeout /t 1 /nobreak >nul & goto wait)",
+        f"if %W% lss 90 ({wait1} & goto wait)",
+        "echo the app was still running after 90 s >> %LOG%",
         ":closed",
+        f"{wait1}",                                   # let the launcher process finish too
     ]
-    files = [f for f in os.listdir(new) if os.path.isfile(os.path.join(new, f))]
+    files = sorted(f for f in os.listdir(new) if os.path.isfile(os.path.join(new, f)))
     for i, f in enumerate(files):
-        # retry: the browser helper or ffmpeg may still be closing
+        src, dst = os.path.join(new, f), os.path.join(here, f)
+        # retry: the app's launcher, the browser helper or ffmpeg may still be closing
         lines += ["set N=0",
                   f":copy{i}",
-                  f'copy /y "{os.path.join(new, f)}" "{here}" >nul && goto next{i}',
+                  f'copy /y "{src}" "{here}" >nul && goto next{i}',
                   "set /a N+=1",
-                  f"if %N% lss 30 (timeout /t 1 /nobreak >nul & goto copy{i})",
-                  f":next{i}"]
+                  f"if %N% lss 60 ({wait1} & goto copy{i})",
+                  f'echo FAILED to replace {f} (still in use?) >> %LOG%',
+                  f"goto done{i}",
+                  f":next{i}",
+                  (f'fc /b "{src}" "{dst}" >nul && echo replaced {f} >> %LOG% '
+                   f'|| echo FAILED: {f} differs after copying >> %LOG%')
+                  if f in (APP_NAME + ".exe", "jmdm-host.exe")       # the ones that matter
+                  else f"echo replaced {f} >> %LOG%",
+                  f":done{i}"]
     if os.path.isdir(os.path.join(new, "extension")):
         lines.append(f'xcopy /e /i /y /q "{os.path.join(new, "extension")}" '
-                     f'"{os.path.join(here, "extension")}" >nul')
+                     f'"{os.path.join(here, "extension")}" >nul && echo replaced extension >> %LOG%')
     # start the new app, then remove this folder (the script included)
-    lines += [f'start "" "{exe}"', 'cd /d "%TEMP%"', f'(goto) 2>nul & rd /s /q "{work}"']
+    lines += ["echo starting the app >> %LOG%", f'start "" "{exe}"', 'cd /d "%TEMP%"',
+              f'(goto) 2>nul & rd /s /q "{work}"']
     with open(bat, "w", encoding="mbcs" if os.name == "nt" else "utf-8") as fh:
         fh.write("\r\n".join(lines) + "\r\n")
     return bat, ext_changed
@@ -230,5 +248,21 @@ def prepare_app_update(progress=lambda done, total: None):
 
 def run_app_update(bat):
     import subprocess
-    flags = 0x08000000 | 0x00000008               # CREATE_NO_WINDOW | DETACHED_PROCESS
-    subprocess.Popen(["cmd", "/c", bat], creationflags=flags, close_fds=True)
+    # A hidden console (CREATE_NO_WINDOW), not DETACHED_PROCESS: commands in the
+    # script need a console. Break away from any job the app runs in (e.g. when
+    # the browser started it), so closing the app can't take the script with it.
+    flags = 0x08000000 | 0x00000200                # CREATE_NO_WINDOW | NEW_PROCESS_GROUP
+    try:
+        subprocess.Popen(["cmd", "/c", bat], creationflags=flags | 0x01000000,
+                         close_fds=True)
+    except OSError:
+        subprocess.Popen(["cmd", "/c", bat], creationflags=flags, close_fds=True)
+
+
+def update_log_tail(lines=12):
+    try:
+        with open(os.path.join(app_dir(), "jmdm_data", "update.log"), encoding="mbcs"
+                  if os.name == "nt" else "utf-8", errors="replace") as fh:
+            return "".join(fh.readlines()[-lines:]).strip()
+    except OSError:
+        return ""
