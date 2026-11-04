@@ -159,3 +159,8 @@ def test_queue_and_category_folders_saved(tmp_path, server):
         assert again.queue == qid and m2.queue(qid)["name"] == "Later"
     finally:
         m2.shutdown()
+
+
+def test_split_archive_parts_are_compressed():
+    for name in ("game.7z.001", "game.zip.002", "game.r00", "game.z01", "game.part12"):
+        assert schedule.category_of(name) == "Compressed", name

@@ -5,6 +5,7 @@ import urllib.parse
 import urllib.error
 import html.parser
 import base64
+from . import gdrive
 from .config import FILE_EXTS, UA
 from .util import is_video_url
 from .net import parse_probe
@@ -227,6 +228,9 @@ def resolve_link(url, referer="", cookie="", user_agent="", max_hops=10,
     site's Download button; the gate is then asked the same way. If the file
     comes straight back in answer to that form, keep_response=True returns
     the open response as "response" (it can't be asked for twice)."""
+    if gdrive.is_folder(url):
+        raise IOError(gdrive.FOLDER_MSG)
+    url = gdrive.direct_link(url) or url
     start, start_referer = url, referer
     jar = _Jar(urllib.parse.urlsplit(url).hostname, cookie)
     method, body = ("POST", post.encode()) if post else ("GET", None)
@@ -303,7 +307,12 @@ def resolve_link(url, referer="", cookie="", user_agent="", max_hops=10,
         raw = resp.read(2 * 1024 * 1024)
         resp.close()
         text = raw.decode(resp.headers.get_content_charset() or "utf-8", errors="replace")
-        nxt = _next_hop(text, url, came_from)
+        problem = gdrive.page_problem(url, text, start)
+        if problem:
+            raise IOError(problem)
+        form = gdrive.scan_form(text, url) \
+            if gdrive.is_drive_host(url) or gdrive.is_drive_host(start) else None
+        nxt = (form, "GET", None) if form else _next_hop(text, url, came_from)
         if nxt is None:
             if _CAPTCHA.search(text):
                 raise IOError("This page asks for a captcha first. Open the link in your "
@@ -323,7 +332,7 @@ def looks_like_download(text):
     if is_video_url(text) and ("watch" in text or "youtu.be" in text
                                or "/videos/" in text or "/reel" in text):
         return True
-    if is_gate_url(text):
+    if is_gate_url(text) or gdrive.looks_like_file_link(text):
         return True
     path = urllib.parse.urlparse(text).path.lower()
     return path.rsplit(".", 1)[-1] in FILE_EXTS if "." in path else False

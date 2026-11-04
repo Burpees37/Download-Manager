@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JM Download Manager",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Sends downloads and videos to the JM Download Manager app for fast multi-connection downloading.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjslD3tKpCvTBVtQFziBv2K7JNn+jRM5CTrQdUsalAA4UXQ2Kw1WBYnValEv5vnr/juFvuvR7CId0u6RSSj1BD5+MOtU/cyCL3ocMPJDyZzQEG/d40w9RC+tqQKUvg5uhPBE19GEsyV8Zg+ZO1c8vx1/zEc6ZesL/RogDfmjVouwtCfDd0u6dh7bb4fkb7lPNPfK9puzuZAOoM54mFz7oBTBQW1cmru/fQoELd4N0XTCj9uc033y+Ep2VIEFiJRjjGa4+8fz39fEge9k4fzQoQExkuC0Kw9vUHhqGWDdMp3RBw4VSJZcKZGPywGBsD56qJK0exFUj6bTxO2uaFUArtwIDAQAB",
   "permissions": [

@@ -7,6 +7,7 @@ app, sleep, shut down). Everything here is plain data, so it is easy to test.
 """
 import datetime
 import os
+import re
 import urllib.parse
 import uuid
 
@@ -32,7 +33,7 @@ def _ext(name):
     if "." not in base:
         return ""
     ext = base.rsplit(".", 1)[1]
-    if ext.startswith("part") and ext[4:].isdigit():          # x.part1 -> archive part
+    if re.fullmatch(r"part\d+|\d{3}|r\d{2}|z\d{2}", ext):        # parts of a split archive
         return "rar"
     return ext
 

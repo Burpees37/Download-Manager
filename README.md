@@ -51,6 +51,16 @@ In Chrome, Edge and Brave the extension takes a download **before the browser sa
 - **Hold Alt** while clicking a link to let the browser download that one file normally.
 - **Cancel gives it back.** With *Ask before starting* on, the browser waits while the app's Add dialog is open. Press *Cancel* (or leave it for 4 minutes) and the browser downloads the file as usual.
 - If the app can't start or can't open the link, the browser keeps the download.
+- **Recent downloads** in the extension popup lists what happened to each download: taken by the app (green), skipped by the rules (grey, with the reason), or kept by the browser because the app couldn't open the link (yellow, with the error). **Send to app** downloads a skipped one with the app.
+- Besides the file types in the list, the extension catches **parts of split archives** (`.001`, `.r00`, `.z01`, `.part3`) and links **without a file name** (`download.php?id=…`) when the file's type is a download, not a web page.
+- **Every file type from Google Drive and Docs** is caught (*Catch every file type from these sites* — edit the list in the popup or Options).
+
+### Google Drive
+- Drive downloads you start in the browser are caught whatever the file type: single files, big files after *Download anyway*, folders and several files (Drive sends them as a ZIP), and Google Docs/Sheets/Slides exports (File → Download).
+- You can also paste or copy **any Drive link** into the app: `drive.google.com/file/d/…/view`, `open?id=…`, `uc?id=…`, links with `resourcekey`, and Google Docs/Sheets/Slides links (saved as .docx/.xlsx/.pptx). Public files download straight away; private ones need your login, so start those from the browser.
+- On a Drive file page, the extension's **Download video** button offers **Original file from Google Drive** — the full-quality file, not the player's stream.
+- Drive's in-between pages are handled: the virus-scan warning is passed automatically; "download limit reached", "you need access" and deleted files show a clear message instead of saving a web page as the file.
+- Drive downloads use up to 8 connections, because Drive starts refusing more.
 
 ## Updates
 - **yt-dlp updates itself** once a day in the background, so YouTube and Facebook downloads keep working without rebuilding the app. If an update ever fails to load, the app goes back to the yt-dlp built into it.

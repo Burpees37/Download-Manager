@@ -88,3 +88,25 @@ def test_bad_requests(app):
     _, call = app
     with pytest.raises(urllib.error.HTTPError):
         call("/add", {"url": "file:///etc/passwd"})
+
+
+def test_old_default_type_list_is_upgraded(tmp_path):
+    import json
+    from jmdm_app import config, manager
+    d = tmp_path / "data"
+    d.mkdir()
+    (d / "settings.json").write_text(json.dumps({"capture_types": config.OLD_CAPTURE_TYPES,
+                                                 "capture_updated": 0}))
+    m = manager.Manager(data_dir=str(d), persist=True)
+    try:
+        s = m.capture_settings()
+        assert "pdf" in s["capture_types"].split() and s["capture_updated"] > 0
+        assert "drive.google.com" in s["capture_always"]
+    finally:
+        m.shutdown()
+    (d / "settings.json").write_text(json.dumps({"capture_types": "zip exe"}))   # user's own
+    m = manager.Manager(data_dir=str(d), persist=True)
+    try:
+        assert m.settings["capture_types"] == "zip exe"
+    finally:
+        m.shutdown()

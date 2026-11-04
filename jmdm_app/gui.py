@@ -964,6 +964,7 @@ def run_gui(initial_url=None):
         types_v = tk.StringVar(value=s["capture_types"])
         min_v = tk.IntVar(value=s["capture_min_kb"])
         excl_v = tk.StringVar(value=s["capture_exclude"])
+        always_v = tk.StringVar(value=s.get("capture_always", ""))
         rows = [
             ("Default folder:", ttk.Entry(frm, textvariable=dir_v, width=50)),
             ("Connections per file:", ttk.Spinbox(frm, from_=1, to=MAX_CONNECTIONS,
@@ -1008,12 +1009,15 @@ def run_gui(initial_url=None):
         ttk.Label(cap, text="Smaller than (KB):").grid(row=3, column=0, sticky="w", pady=3)
         ttk.Spinbox(cap, from_=0, to=10000000, increment=100, textvariable=min_v,
                     width=10).grid(row=3, column=1, sticky="w", pady=3)
-        ttk.Label(cap, text="Never catch on:").grid(row=4, column=0, sticky="w", pady=3)
-        ttk.Entry(cap, textvariable=excl_v).grid(row=4, column=1, columnspan=2, sticky="ew",
+        ttk.Label(cap, text="Every type from:").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Entry(cap, textvariable=always_v).grid(row=4, column=1, columnspan=2, sticky="ew",
+                                                   pady=3)
+        ttk.Label(cap, text="Never catch on:").grid(row=5, column=0, sticky="w", pady=3)
+        ttk.Entry(cap, textvariable=excl_v).grid(row=5, column=1, columnspan=2, sticky="ew",
                                                  pady=3)
-        ttk.Label(cap, text="Sites separated by spaces, e.g. drive.google.com mega.nz. "
-                            "Hold Alt while clicking a link to skip the app once.",
-                  foreground="#777").grid(row=5, column=0, columnspan=3, sticky="w")
+        ttk.Label(cap, text="Sites separated by spaces. “Every type from” starts with Google "
+                            "Drive and Docs. Hold Alt while clicking a link to skip the app once.",
+                  foreground="#777").grid(row=6, column=0, columnspan=3, sticky="w")
         upf = ttk.LabelFrame(frm, text="Updates", padding=8)
         upf.grid(row=n + 4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         upf.columnconfigure(0, weight=1)
@@ -1049,12 +1053,13 @@ def run_gui(initial_url=None):
                          check_app_updates=appu_v.get(),
                          video_quality=q_v.get())
                 rules = (cap_v.get(), " ".join(types_v.get().split()),
-                         max(0, int(min_v.get())), " ".join(excl_v.get().split()))
+                         max(0, int(min_v.get())), " ".join(excl_v.get().split()),
+                         " ".join(always_v.get().split()))
                 if rules != (s["browser_capture"], s["capture_types"], s["capture_min_kb"],
-                             s["capture_exclude"]):
+                             s["capture_exclude"], s.get("capture_always", "")):
                     s.update(browser_capture=rules[0], capture_types=rules[1],
                              capture_min_kb=rules[2], capture_exclude=rules[3],
-                             capture_updated=time.time())
+                             capture_always=rules[4], capture_updated=time.time())
             except Exception:
                 messagebox.showerror("Options", "Please enter whole numbers.", parent=win)
                 return

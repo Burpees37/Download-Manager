@@ -7,6 +7,7 @@ import http.client
 from .config import APP_NAME, DECISION_WAIT, LISTEN_PORT, VERSION
 from .util import clean_err, is_video_url, sanitize
 from .net import probe_info
+from . import gdrive
 from .gates import _script_name, is_gate_url, resolve_link
 
 def settle(job, accepted):
@@ -100,6 +101,8 @@ def start_listener(mgr):
                     raise ValueError("bad url")
             except Exception:
                 return self._reply(400, {"error": "bad request"})
+            if not bool(req.get("video")) and not req.get("series"):
+                url = gdrive.direct_link(url) or url      # Drive page -> the file itself
             job = {
                 "url": url,
                 "filename": sanitize(req["filename"]) if req.get("filename")

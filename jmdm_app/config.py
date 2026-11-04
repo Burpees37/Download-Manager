@@ -1,7 +1,7 @@
 """Names, versions and fixed settings used across the app."""
 
 APP_NAME = "JM Download Manager"
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 BUILD = 0          # set by the GitHub build (run number); 0 = built by hand
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
@@ -14,11 +14,19 @@ SOCKET_TIMEOUT = 30
 LISTEN_PORT = 8721
 # Which browser downloads the extension hands to the app (IDM-style rules).
 # The extension keeps a copy; whichever side changed last wins.
-DEFAULT_CAPTURE_TYPES = ("zip rar 7z tar gz bz2 xz zst iso img bin cue exe msi msix appx "
-                         "apk xapk apks obb jar dmg deb rpm mp4 mkv avi mov wmv flv webm "
-                         "m4v mpg mpeg 3gp mp3 m4a aac flac wav ogg opus wma")
+DEFAULT_CAPTURE_TYPES = ("zip rar 7z tar gz bz2 xz zst cab iso img bin cue wim esd vhd vhdx "
+                         "exe msi msix appx apk xapk apks obb jar dmg deb rpm "
+                         "mp4 mkv avi mov wmv flv webm m4v mpg mpeg 3gp ts "
+                         "mp3 m4a aac flac wav ogg opus wma "
+                         "pdf epub mobi azw3 cbz cbr doc docx xls xlsx ppt pptx odt ods odp rtf psd")
+# The list shipped before 1.8.1; a saved copy of it is moved to the new one.
+OLD_CAPTURE_TYPES = ("zip rar 7z tar gz bz2 xz zst iso img bin cue exe msi msix appx "
+                     "apk xapk apks obb jar dmg deb rpm mp4 mkv avi mov wmv flv webm "
+                     "m4v mpg mpeg 3gp mp3 m4a aac flac wav ogg opus wma")
+# Downloads from these sites are caught whatever their file type.
+DEFAULT_CAPTURE_ALWAYS = "drive.google.com docs.google.com usercontent.google.com"
 CAPTURE_KEYS = ("browser_capture", "capture_types", "capture_min_kb", "capture_exclude",
-                "capture_updated")
+                "capture_always", "capture_updated")
 # How long a caught download waits for the Add dialog before the browser keeps it.
 DECISION_WAIT = 240
 NATIVE_HOST = "com.jmbuilds.jmdm"

@@ -7,7 +7,7 @@ import threading
 import urllib.request
 import urllib.parse
 import urllib.error
-from .config import CAPTURE_KEYS, DEFAULT_CAPTURE_TYPES, LISTEN_PORT, UA
+from .config import CAPTURE_KEYS, DEFAULT_CAPTURE_ALWAYS, DEFAULT_CAPTURE_TYPES, OLD_CAPTURE_TYPES, LISTEN_PORT, UA
 from .util import app_dir, clean_err, default_download_dir, is_video_url, is_whole_playlist_url, playlist_url, sanitize, unique_path
 from .gates import _script_name
 from .updates import have_ytdlp, load_ytdlp
@@ -15,6 +15,7 @@ from .series import fetch_html, find_cover, find_episode_media, find_episodes, p
 from .downloader import Download, RateLimiter
 from .video import VideoDownload
 from .browser import start_listener
+from . import gdrive
 from .schedule import MAIN, category_of, clean_queues, default_queues, schedule_events
 import datetime
 
@@ -35,6 +36,7 @@ class Manager:
             "capture_types": DEFAULT_CAPTURE_TYPES,
             "capture_min_kb": 0,
             "capture_exclude": "",
+            "capture_always": DEFAULT_CAPTURE_ALWAYS,
             "capture_updated": 0,
             "auto_update_ytdlp": True,
             "check_app_updates": True,
@@ -52,6 +54,10 @@ class Manager:
         if persist:
             self.load()
         self.settings["queues"] = clean_queues(self.settings.get("queues"))
+        if " ".join(str(self.settings.get("capture_types", "")).split()) == OLD_CAPTURE_TYPES:
+            # still the old default list: use the new one (PDFs, documents …)
+            self.settings["capture_types"] = DEFAULT_CAPTURE_TYPES
+            self.settings["capture_updated"] = time.time()
         self.queue_running = {MAIN: True}      # other queues run when started
         self._queue_ran = set()                # queues that started something this run
         self.events = queue.Queue()            # ("queue_done", id) for the window
@@ -111,6 +117,8 @@ class Manager:
                 capture_types=str(new.get("capture_types", ""))[:2000],
                 capture_min_kb=max(0, int(new.get("capture_min_kb", 0))),
                 capture_exclude=str(new.get("capture_exclude", ""))[:4000],
+                capture_always=str(new.get("capture_always",
+                                           self.settings.get("capture_always", "")))[:4000],
                 capture_updated=stamp)
         except (TypeError, ValueError):
             return False
@@ -126,12 +134,16 @@ class Manager:
             cookie="", user_agent="", video=None, quality=None, start=True,
             mirrors=None, name_prefix="", queue=MAIN):
         url = url.strip()
+        if not (video if video is not None else is_video_url(url)):
+            url = gdrive.direct_link(url) or url
         if not folder and self.settings.get("category_folders"):
             v = is_video_url(url) if video is None else video
             folder = os.path.join(self.settings["download_dir"],
                                   category_of(filename, url, v))
         folder = folder or self.settings["download_dir"]
         connections = connections or self.settings["connections"]
+        if gdrive.is_drive_host(url):
+            connections = min(int(connections), gdrive.MAX_CONNECTIONS)
         if video is None:
             video = is_video_url(url)
         if video:

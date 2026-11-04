@@ -26,4 +26,11 @@ def test_catch_rules():
     assert out == {"firefoxHookUnused": True, "zip": taken, "png": "suggest",
                    "cancelled": "add:true,suggest", "alt": "suggest", "excluded": "suggest",
                    "small": "suggest", "anyType": taken, "off": "suggest",
+                   # new in 1.8.1
+                   "pdf": taken, "split": taken, "nameless": taken, "namelessZip": taken,
+                   "namelessHtml": "suggest", "drivePng": taken, "docsExport": taken,
+                   "blob": "suggest", "cancelled2": "add:true,suggest",
+                   "recent": ["cancelled:why", "skipped:why", "taken:-", "taken:-"],
+                   "recentNames": ["game.zip", "game.zip", "Notes.txt"],
+                   "driveButton": "Original file from Google Drive|false",
                    "appDown": "suggest"}

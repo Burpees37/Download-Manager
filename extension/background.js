@@ -130,19 +130,28 @@ api.webRequest.onBeforeRequest.addListener((d) => {
 // ---------------------------------------------------------------------------
 const RULE_DEFAULTS = {
   browser_capture: true,
-  capture_types: "zip rar 7z tar gz bz2 xz zst iso img bin cue exe msi msix appx apk xapk " +
-    "apks obb jar dmg deb rpm mp4 mkv avi mov wmv flv webm m4v mpg mpeg 3gp mp3 m4a aac " +
-    "flac wav ogg opus wma",
+  capture_types: "zip rar 7z tar gz bz2 xz zst cab iso img bin cue wim esd vhd vhdx " +
+    "exe msi msix appx apk xapk apks obb jar dmg deb rpm " +
+    "mp4 mkv avi mov wmv flv webm m4v mpg mpeg 3gp ts " +
+    "mp3 m4a aac flac wav ogg opus wma " +
+    "pdf epub mobi azw3 cbz cbr doc docx xls xlsx ppt pptx odt ods odp rtf psd",
   capture_min_kb: 0,
   capture_exclude: "",
+  // every file type is caught from these (Google Drive and Docs)
+  capture_always: "drive.google.com docs.google.com usercontent.google.com",
   capture_updated: 0
 };
+// The list shipped before 1.8.1: a stored copy of it means "the default".
+const OLD_TYPES = "zip rar 7z tar gz bz2 xz zst iso img bin cue exe msi msix appx apk xapk " +
+  "apks obb jar dmg deb rpm mp4 mkv avi mov wmv flv webm m4v mpg mpeg 3gp mp3 m4a aac " +
+  "flac wav ogg opus wma";
 
 async function getRules() {
   const v = await api.storage.local.get([...Object.keys(RULE_DEFAULTS), "capture"]);
   const r = { ...RULE_DEFAULTS };
   for (const k of Object.keys(RULE_DEFAULTS)) if (v[k] !== undefined) r[k] = v[k];
   if (v.browser_capture === undefined && v.capture === false) r.browser_capture = false; // old switch
+  if (words(r.capture_types).join(" ") === OLD_TYPES) r.capture_types = RULE_DEFAULTS.capture_types;
   return r;
 }
 
@@ -174,35 +183,95 @@ function extOf(name) {
   const m = /\.([a-z0-9]{1,8})$/i.exec(name || "");
   return m ? m[1].toLowerCase() : "";
 }
+function siteList(text) {
+  return words(text).map(x => x.replace(/^[a-z]+:\/\//, "").replace(/\/.*$/, "").replace(/^\*?\./, ""));
+}
 function onSite(url, sites) {
   const h = host(url);
   return !!h && sites.some(d => h === d || h.endsWith("." + d));
 }
+// game.7z.001, game.r00, game.z01, game.part3 -> pieces of a split archive
+function isSplitPart(ext) {
+  return /^(\d{3}|r\d{2}|z\d{2}|part\d+)$/.test(ext);
+}
+// When neither the file name nor the link says what the file is (download.php?id=…).
+const MIME_EXT = {
+  "application/zip": "zip", "application/x-zip-compressed": "zip", "application/x-rar-compressed": "rar",
+  "application/vnd.rar": "rar", "application/x-7z-compressed": "7z", "application/gzip": "gz",
+  "application/x-tar": "tar", "application/x-iso9660-image": "iso",
+  "application/x-msdownload": "exe", "application/x-msdos-program": "exe",
+  "application/x-dosexec": "exe", "application/x-msi": "msi", "application/x-ms-installer": "msi",
+  "application/vnd.android.package-archive": "apk", "application/java-archive": "jar",
+  "application/pdf": "pdf", "application/epub+zip": "epub", "application/msword": "doc",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.ms-excel": "xls",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/vnd.ms-powerpoint": "ppt",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+  "video/mp4": "mp4", "video/x-matroska": "mkv", "video/webm": "webm", "video/quicktime": "mov",
+  "video/x-msvideo": "avi", "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/flac": "flac",
+  "audio/wav": "wav", "audio/ogg": "ogg"
+};
+const UNKNOWN_MIME = ["", "application/octet-stream", "binary/octet-stream",
+                      "application/force-download", "application/download", "application/x-download"];
+
+const SCRIPT_EXT = ["php", "php3", "php5", "asp", "aspx", "jsp", "cgi", "pl", "py", "do",
+                    "action", "html", "htm", "shtml"];
 
 // Hold Alt while clicking a link: that one download stays in the browser.
 let bypassUntil = 0;
+
+// What the download is, for the rules and the recent list.
+function describeItem(item, url) {
+  const name = (item.filename || "").split(/[\\/]/).pop();
+  let ext = extOf(name);
+  if (!ext) { try { ext = extOf(new URL(url).pathname); } catch (e) {} }
+  // download.php?id=7, get.aspx … : that's the site's script, not the file's type
+  if (SCRIPT_EXT.includes(ext)) ext = "";
+  return { name, ext, mime: (item.mime || "").toLowerCase().split(";")[0].trim() };
+}
 
 // Why a download should stay in the browser, or "" when the app should take it.
 async function skipReason(item, url) {
   const rules = await getRules();
   if (!rules.browser_capture) return "catching is off";
-  if (!/^https?:/i.test(url)) return "not a web link";     // blob:/data: can't be re-opened
+  if (!/^https?:/i.test(url)) return "made by the page itself (blob link), can't be re-downloaded";
   if (item.byExtensionId) return "started by an extension";
   if (Date.now() < bypassUntil) { bypassUntil = 0; return "Alt was held"; }
-  const sites = words(rules.capture_exclude)
-    .map(x => x.replace(/^[a-z]+:\/\//, "").replace(/\/.*$/, "").replace(/^\*?\./, ""));
-  if ([url, item.url, item.referrer].some(u => u && onSite(u, sites))) return "excluded site";
+  const from = [url, item.url, item.finalUrl, item.referrer].filter(Boolean);
+  if (from.some(u => onSite(u, siteList(rules.capture_exclude)))) return "site is on the never-catch list";
+  const always = from.some(u => onSite(u, siteList(rules.capture_always)));
   const types = words(rules.capture_types).map(x => x.replace(/^\*?\./, ""));
-  if (types.length) {
-    const name = (item.filename || "").split(/[\\/]/).pop();
-    let ext = extOf(name);
-    if (!ext) { try { ext = extOf(new URL(url).pathname); } catch (e) {} }
-    if (!types.includes(ext)) return "file type not in the list";
+  if (types.length && !always) {
+    let { ext, mime } = describeItem(item, url);
+    if (!ext && MIME_EXT[mime]) ext = MIME_EXT[mime];
+    const archives = ["zip", "rar", "7z"].some(a => types.includes(a));
+    if (ext && isSplitPart(ext)) {
+      if (!archives) return "split archive parts aren't in the list";
+    } else if (ext) {
+      if (!types.includes(ext)) return `.${ext} isn't in the file type list`;
+    } else if (!UNKNOWN_MIME.includes(mime) && !/^(video|audio)\//.test(mime)) {
+      return `no file name, and the type (${mime}) isn't one to catch`;
+    }
+    // no name and an unknown type (download.php?id=…): a real file, so take it
   }
   const size = item.totalBytes > 0 ? item.totalBytes : (item.fileSize > 0 ? item.fileSize : 0);
   const min = Number(rules.capture_min_kb) || 0;
-  if (min > 0 && size > 0 && size < min * 1024) return "smaller than the minimum";
+  if (min > 0 && size > 0 && size < min * 1024) return "smaller than the minimum size";
   return "";
+}
+
+// ---- recent downloads: what happened to each, shown in the popup ------------
+const RECENT_MAX = 30;
+async function remember(item, url, result, reason) {
+  try {
+    const { recent = [] } = await api.storage.local.get("recent");
+    const { name } = describeItem(item, url);
+    recent.unshift({ ts: Date.now(), name: name || url.split("?")[0].split("/").pop() || url,
+                     url, referer: item.referrer || "", result, reason: reason || "",
+                     size: item.totalBytes > 0 ? item.totalBytes : 0 });
+    await api.storage.local.set({ recent: recent.slice(0, RECENT_MAX) });
+  } catch (e) { /* the list is only a help */ }
 }
 
 // Ask the app to take a download, and wait until it has really reached the
@@ -225,23 +294,28 @@ async function checkWithApp(job) {
       body: JSON.stringify(job)
     });
     clearTimeout(t);
-    if (!r.ok) return { ok: false };
+    if (!r.ok) return { ok: false, error: `the app answered ${r.status}` };
     return await r.json();
-  } catch (e) { return { ok: false }; }
+  } catch (e) { return { ok: false, error: "no answer from the app" }; }
   finally { clearInterval(keep); }
 }
 
-// Offer a held download to the app. True = the app took it.
+// Offer a held download to the app: { taken, result, reason }.
 async function offerToApp(item) {
   const url = item.finalUrl || item.url;
-  if (await skipReason(item, url)) return false;
+  const skip = await skipReason(item, url);
+  if (skip) return { taken: false, result: "skipped", reason: skip };
   // If the app is closed, start it; if that doesn't work, the browser keeps it.
-  if (!(await appAlive()) && !(await launchApp())) return false;
+  if (!(await appAlive()) && !(await launchApp()))
+    return { taken: false, result: "browser", reason: "the app isn't running and couldn't be started" };
   const form = posts.get(url.split("#")[0]) || posts.get((item.url || "").split("#")[0]);
   const filename = (item.filename || "").split(/[\\/]/).pop();
   const res = await checkWithApp({ url, referer: item.referrer || "", filename, video: false,
                                    post: form ? form.body : "" });
-  return !!(res && res.ok);
+  if (res && res.ok) return { taken: true, result: "taken", reason: "" };
+  const why = (res && res.error) || "the app couldn't open the link";
+  return { taken: false, result: why === "cancelled in the app" ? "cancelled" : "browser",
+           reason: why };
 }
 
 async function dropBrowserCopy(id) {
@@ -254,24 +328,30 @@ if (api.downloads.onDeterminingFilename) {
   // anything or shows "Save as". Holding the answer holds the download, so the
   // app takes it before a file lands in your Downloads folder.
   api.downloads.onDeterminingFilename.addListener((item, suggest) => {
-    offerToApp(item).then(async (taken) => {
-      if (taken) {
+    const url = item.finalUrl || item.url;
+    offerToApp(item).then(async (o) => {
+      remember(item, url, o.result, o.reason);
+      if (o.taken) {
         await dropBrowserCopy(item.id);
         flash("✓", "#2e7d32");
       } else {
         suggest();                                   // carry on as a normal download
+        if (o.result !== "skipped") flash("↓", "#f9a825");
       }
-    }).catch(() => suggest());
+    }).catch((e) => { remember(item, url, "browser", String(e)); suggest(); });
     return true;                                     // we answer later
   });
 } else {
   // Firefox has no such hook: pause the download as soon as it starts instead.
   api.downloads.onCreated.addListener(async (item) => {
     const url = item.finalUrl || item.url;
-    if (await skipReason(item, url)) return;
+    const skip = await skipReason(item, url);
+    if (skip) { remember(item, url, "skipped", skip); return; }
     let paused = false;
     try { await api.downloads.pause(item.id); paused = true; } catch (e) { /* already done */ }
-    if (await offerToApp(item)) {
+    const o = await offerToApp(item);
+    remember(item, url, o.result, o.reason);
+    if (o.taken) {
       await dropBrowserCopy(item.id);
       flash("✓", "#2e7d32");
     } else {
@@ -329,6 +409,10 @@ function choicesFor(tab, frameUrl, src) {
   const page = tab && tab.url;
   if (frameUrl && isVideoSite(frameUrl) && frameUrl !== page) {
     out.push({ label: "Embedded video (best quality)", url: frameUrl, video: true });
+  }
+  if (page && /^https:\/\/(drive|docs)\.google\.com\/(file\/(u\/\d+\/)?d\/|open\?|uc\?)/.test(page)) {
+    out.push({ label: "Original file from Google Drive", url: page, video: false });
+    return out;                                   // Drive's player only streams small pieces
   }
   if (page && isVideoSite(page)) {
     out.push({ label: "This video (best quality)", url: page, video: true });
@@ -405,6 +489,14 @@ api.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.type === "rules-changed") {             // edited in the popup
     syncRules(true);
     return;
+  }
+  if (msg.type === "recent") {
+    api.storage.local.get("recent").then(v => reply({ recent: v.recent || [] }));
+    return true;
+  }
+  if (msg.type === "clear-recent") {
+    api.storage.local.set({ recent: [] }).then(() => reply({ ok: true }));
+    return true;
   }
   if (msg.type === "status") {                    // popup opened: also pull the app's rules
     appAlive().then(async ok => { if (ok) await syncRules(true); reply({ ok }); });

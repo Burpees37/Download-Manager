@@ -25,6 +25,16 @@
   input[type=number] { width: 90px; }
   .hint { color: #777; font-size: 11px; margin-top: 2px; }
   .link { all: unset; color: #1d5fbf; font-size: 11px; cursor: pointer; text-decoration: underline; }
+  #recent { margin-top: 6px; max-height: 230px; overflow-y: auto; }
+  .ri { display: flex; gap: 8px; padding: 6px 2px; border-bottom: 1px solid #eef0f3; }
+  .ri .d { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; }
+  .ri .t { flex: 1; min-width: 0; }
+  .ri .n { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ri .w { font-size: 11px; color: #555; }
+  .ri button { all: unset; flex: none; align-self: center; font-size: 11px; color: #1d5fbf;
+               cursor: pointer; text-decoration: underline; }
+  .taken { background: #2e7d32; } .skipped { background: #9aa1ac; }
+  .browser, .cancelled { background: #e0a300; }
 </style>
 </head>
 <body>
@@ -40,8 +50,11 @@
     <div class="hint">Blank = every type. <button class="link" id="reset">Use defaults</button></div>
     <label class="f" for="min">Skip files smaller than (KB)</label>
     <input type="number" id="min" min="0" step="100">
+    <label class="f" for="always">Catch every file type from these sites</label>
+    <textarea id="always" spellcheck="false"></textarea>
+    <div class="hint">Google Drive and Docs by default.</div>
     <label class="f" for="excl">Never catch on these sites</label>
-    <textarea id="excl" spellcheck="false" placeholder="drive.google.com mega.nz"></textarea>
+    <textarea id="excl" spellcheck="false" placeholder="example.com mega.nz"></textarea>
     <div class="hint">Hold <b>Alt</b> while clicking a link to let the browser download it once.
       Same rules as the app's Settings.</div>
   </details>
@@ -50,6 +63,13 @@
   <button id="vid">Download video on this tab</button>
   <button id="season" class="ghost">Download whole season from this page</button>
   <div id="list"></div>
+  <details id="recentbox">
+    <summary>Recent downloads <span id="rcount"></span></summary>
+    <div class="hint">Green = the app took it · grey = skipped by the rules ·
+      yellow = the app couldn't open it, so the browser kept it.
+      <button class="link" id="clear">Clear</button></div>
+    <div id="recent"></div>
+  </details>
   <p id="msg">Right-click any link → “Download with JM Download Manager”.</p>
   <script src="popup.js"></script>
 </body>

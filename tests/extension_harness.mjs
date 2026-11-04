@@ -21,7 +21,8 @@ globalThis.fetch = async (url, o = {}) => {
   if (url.endsWith("/ping")) return { ok: true };
   if (url.endsWith("/settings")) return { ok: true, json: async () => ({ capture_updated: 0 }) };
   if (url.endsWith("/add")) { const j = JSON.parse(o.body); calls.push("add:" + j.wait);
-    return { ok: true, json: async () => ({ ok: appAnswer }) }; }
+    return { ok: true, json: async () => (appAnswer ? { ok: true }
+                                     : { ok: false, error: "cancelled in the app" }) }; }
 };
 eval(fs.readFileSync(process.argv[2], "utf8"));
 const run = (item) => new Promise((res) => {
@@ -41,5 +42,26 @@ store.capture_exclude = "h.com"; out.excluded = await run(base); store.capture_e
 store.capture_min_kb = 10000; out.small = await run(base); store.capture_min_kb = 0;
 store.capture_types = ""; out.anyType = await run({ ...base, filename: "pic.png" }); delete store.capture_types;
 store.browser_capture = false; out.off = await run(base); delete store.browser_capture;
+out.pdf = await run({ ...base, filename: "manual.pdf", finalUrl: "https://h.com/manual.pdf" });
+out.split = await run({ ...base, filename: "game.7z.001", finalUrl: "https://h.com/game.7z.001" });
+out.nameless = await run({ ...base, filename: "", finalUrl: "https://h.com/download.php?id=7",
+                           mime: "application/octet-stream" });
+out.namelessZip = await run({ ...base, filename: "", finalUrl: "https://h.com/get/7", mime: "application/zip" });
+out.namelessHtml = await run({ ...base, filename: "", finalUrl: "https://h.com/get/8", mime: "text/html" });
+out.drivePng = await run({ ...base, filename: "photo.png",
+  url: "https://drive.usercontent.google.com/download?id=abc&export=download",
+  finalUrl: "https://drive.usercontent.google.com/download?id=abc&export=download",
+  referrer: "https://drive.google.com/" });
+out.docsExport = await run({ ...base, filename: "Notes.txt",
+  url: "https://docs.google.com/document/d/abc/export?format=txt",
+  finalUrl: "https://doc-0k-2s-docs.googleusercontent.com/export/xyz", referrer: "https://docs.google.com/" });
+out.blob = await run({ ...base, url: "blob:https://h.com/1", finalUrl: "blob:https://h.com/1" });
+appAnswer = false; out.cancelled2 = await run(base); appAnswer = true;
+const rec = await new Promise(r => listeners.om({ type: "recent" }, {}, r));
+out.recent = rec.recent.slice(0, 4).map(x => x.result + ":" + (x.reason ? "why" : "-"));
+out.recentNames = rec.recent.slice(0, 3).map(x => x.name);
+const ch = await new Promise(r => listeners.om({ type: "choices", frameUrl: "" },
+  { tab: { id: 9, url: "https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz012345/view", title: "x" } }, r));
+out.driveButton = ch.choices.map(c => c.label + "|" + c.video).join(";");
 appUp = false; await new Promise(r => setTimeout(r, 3100)); out.appDown = await run(base);
 console.log(JSON.stringify(out));
