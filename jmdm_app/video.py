@@ -2,7 +2,7 @@
 import os
 import re
 from .config import UA
-from .util import find_ffmpeg, sanitize
+from .util import find_ffmpeg, is_youtube_url, sanitize
 from .updates import load_ytdlp
 from .downloader import Download
 
@@ -79,8 +79,16 @@ class VideoDownload(Download):
         headers = {"User-Agent": self.user_agent or UA}
         if self.referer:
             headers["Referer"] = self.referer
-        if self.cookie:
-            headers["Cookie"] = self.cookie
+        # YouTube: never pass the browser's login. With account cookies yt-dlp
+        # switches to "signed-in" YouTube clients that all need a JavaScript
+        # runtime (Deno), so videos sent by the browser's Download video button
+        # failed while the same link pasted into the app worked. Signed out,
+        # yt-dlp uses a client that works without one. Same for the browser's
+        # User-Agent: send the app's own, exactly like a pasted link.
+        if is_youtube_url(self.url):
+            headers["User-Agent"] = UA
+        elif self.cookie:
+            headers["Cookie"] = self.cookie        # e.g. private Facebook videos
 
         def hook(d):
             if self._stop.is_set():

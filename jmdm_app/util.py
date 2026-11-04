@@ -73,6 +73,12 @@ def is_video_url(url):
     return any(host == d or host.endswith("." + d) for d in VIDEO_SITES)
 
 
+def is_youtube_url(url):
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return any(host == d or host.endswith("." + d)
+               for d in ("youtube.com", "youtu.be", "youtube-nocookie.com"))
+
+
 def is_playlist_url(url):
     """True for links that point at a list of videos (YouTube playlist/channel)."""
     p = urllib.parse.urlparse(url)
