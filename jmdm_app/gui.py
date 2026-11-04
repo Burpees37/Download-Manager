@@ -152,6 +152,29 @@ def run_gui(initial_url=None):
         s = side.selection()
         return s[0][2:] if s and s[0].startswith("q:") and mgr.queue(s[0][2:]) else None
 
+    def new_dialog():
+        """A dialog window, kept hidden until show_dialog() has placed it."""
+        win = tk.Toplevel(root)
+        win.withdraw()
+        win.transient(root)
+        return win
+
+    def show_dialog(win):
+        """Center a dialog over the app window (on the same monitor), then show it."""
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        rx, ry = root.winfo_rootx(), root.winfo_rooty()
+        rw, rh = root.winfo_width(), root.winfo_height()
+        x = rx + max(int(20 * S), (rw - w) // 2)
+        y = ry + max(int(20 * S), (rh - h) // 3)
+        if root.state() == "withdrawn" or rw <= 1:            # app window not shown
+            x = (win.winfo_screenwidth() - w) // 2
+            y = (win.winfo_screenheight() - h) // 3
+        win.geometry(f"+{x}+{y}")
+        win.deiconify()
+        win.lift()
+        win.focus_force()
+
     # ---- menu bar --------------------------------------------------------
     menubar = tk.Menu(root)
     m_tasks = tk.Menu(menubar, tearoff=0)
@@ -408,9 +431,8 @@ def run_gui(initial_url=None):
                    video=None, from_browser=False, season=False, series_links=None,
                    job=None):
         # job: a browser download held until this dialog is answered
-        win = tk.Toplevel(root)
+        win = new_dialog()
         win.title("Add download")
-        win.transient(root)
         win.resizable(True, False)
         frm = ttk.Frame(win, padding=14)
         frm.pack(fill="both", expand=True)
@@ -630,16 +652,15 @@ def run_gui(initial_url=None):
         win.protocol("WM_DELETE_WINDOW", cancel)
         win.bind("<Return>", lambda e: ok())
         win.bind("<Escape>", lambda e: cancel())
+        show_dialog(win)
         e_url.focus_set()
-        win.lift()
         win.attributes("-topmost", True)
         win.after(300, lambda: win.attributes("-topmost", False))
 
     def scheduler_dialog(new=False, select=None):
         """Queues and their schedules, like IDM's Scheduler window."""
-        win = tk.Toplevel(root)
+        win = new_dialog()
         win.title("Scheduler")
-        win.transient(root)
         frm = ttk.Frame(win, padding=12)
         frm.pack(fill="both", expand=True)
         frm.columnconfigure(1, weight=1)
@@ -856,6 +877,7 @@ def run_gui(initial_url=None):
         first = select if select in ids else MAIN
         lst.selection_set(ids.index(first))
         load(first)
+        show_dialog(win)
         if new:
             add_queue()
 
@@ -868,9 +890,8 @@ def run_gui(initial_url=None):
         if action == "none":
             mgr.notice = f"“{q['name']}” is done"
             return
-        win = tk.Toplevel(root)
+        win = new_dialog()
         win.title("Queue finished")
-        win.transient(root)
         win.attributes("-topmost", True)
         frm = ttk.Frame(win, padding=16)
         frm.pack(fill="both", expand=True)
@@ -919,13 +940,13 @@ def run_gui(initial_url=None):
         ttk.Button(b, text="Do it now", command=do_it).pack(side="left", padx=4)
         ttk.Button(b, text="Cancel", command=cancel).pack(side="left")
         win.protocol("WM_DELETE_WINDOW", cancel)
+        show_dialog(win)
         tick()
 
     def settings_dialog():
         s = mgr.settings
-        win = tk.Toplevel(root)
+        win = new_dialog()
         win.title("Options")
-        win.transient(root)
         frm = ttk.Frame(win, padding=14)
         frm.pack(fill="both", expand=True)
         frm.columnconfigure(1, weight=1)
@@ -1044,6 +1065,7 @@ def run_gui(initial_url=None):
         b.grid(row=n + 6, column=0, columnspan=3, sticky="e", pady=(12, 0))
         ttk.Button(b, text="Save", command=save).pack(side="left", padx=4)
         ttk.Button(b, text="Cancel", command=win.destroy).pack(side="left")
+        show_dialog(win)
 
     # ---- updates ---------------------------------------------------------
     upd = {"busy": False, "offer": None, "report": None, "ready": None}
