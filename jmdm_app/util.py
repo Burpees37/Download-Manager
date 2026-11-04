@@ -97,6 +97,37 @@ def playlist_url(url):
     return url
 
 
+def short_error(msg):
+    """yt-dlp errors start with "[youtube] <id>: " — drop that so the reason shows."""
+    return re.sub(r"^\[[\w:.-]+\] [^:\s]+: ", "", (msg or "").strip())
+
+
+_HINTS = [
+    (r"sign in to confirm|not a bot|cookies.*(?:required|needed)",
+     "YouTube wants a signed-in browser. Use the ⬇ Download video button on the "
+     "YouTube page instead, so your login comes along."),
+    (r"javascript runtime|n challenge|nsig|signature (?:solving|extraction)|"
+     r"requested format is not available|only images are available",
+     "YouTube needs a JavaScript runtime (Deno) to unlock the video formats, and "
+     "this app doesn't have one yet."),
+    (r"http error 403|forbidden",
+     "YouTube blocked the download (403). This is usually fixed by a yt-dlp update — "
+     "try Help → Check for updates later, then Redownload."),
+    (r"private video|members-only|join this channel",
+     "This video is private or members-only; only its owner or members can get it."),
+    (r"video unavailable|has been removed|no longer available",
+     "The video is gone or blocked in your country."),
+]
+
+
+def error_hint(msg):
+    """A plain-language next step for common video-site errors, or ""."""
+    for pattern, hint in _HINTS:
+        if re.search(pattern, msg or "", re.I):
+            return hint
+    return ""
+
+
 def clean_err(e):
     msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e)).replace("ERROR: ", "").strip()
     m = re.match(r"<urlopen error (?:\[Errno -?\d+\] )?(.*)>$", msg)

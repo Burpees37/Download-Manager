@@ -73,3 +73,14 @@ def test_episodes_and_items():
     assert eps[0][1] == "https://anime.example/watch.php?ep=1"
     assert series.parse_items("1-3,5", range(1, 7)) == {1, 2, 3, 5}
     assert series.parse_items("", [1, 2]) == {1, 2}
+
+
+def test_error_text():
+    from jmdm_app.util import error_hint, short_error
+    raw = "[youtube] C61_2MutmAU: Sign in to confirm you're not a bot. Use --cookies"
+    assert short_error(raw).startswith("Sign in to confirm")
+    assert short_error("plain error") == "plain error"
+    assert "signed-in browser" in error_hint(raw)
+    assert "Deno" in error_hint("[youtube] x: Requested format is not available")
+    assert "403" in error_hint("ERROR: unable to download video data: HTTP Error 403: Forbidden")
+    assert error_hint("something new") == ""

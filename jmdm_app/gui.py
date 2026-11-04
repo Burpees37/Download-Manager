@@ -8,7 +8,7 @@ import queue
 import threading
 import urllib.parse
 from .config import APP_NAME, BUILD, DEFAULT_CAPTURE_TYPES, MAX_CONNECTIONS, VERSION
-from .util import clean_err, default_download_dir, find_ffmpeg, human_size, human_time, is_playlist_url, is_video_url, is_whole_playlist_url, sanitize
+from .util import clean_err, default_download_dir, error_hint, short_error, find_ffmpeg, human_size, human_time, is_playlist_url, is_video_url, is_whole_playlist_url, sanitize
 from .gates import looks_like_download
 from .updates import _ytdlp_source, app_update_available, have_ytdlp, prepare_app_update, run_app_update, update_ytdlp, ytdlp_version
 from .integration import register_browser_integration
@@ -132,6 +132,13 @@ def run_gui(initial_url=None):
                 subprocess.Popen(["explorer", "/select,", d.path])
             else:
                 os.startfile(folder)
+
+    def copy_error():
+        sel = [d for d in selected() if d.status == "Error"]
+        if sel:
+            root.clipboard_clear()
+            root.clipboard_append(sel[0].error)
+            last_clip[0] = sel[0].error
 
     def copy_url():
         sel = selected()
@@ -298,8 +305,10 @@ def run_gui(initial_url=None):
     tk.Frame(right, height=1, bg="#e5e8ed").pack(side="bottom", fill="x")
     det.pack(side="bottom", fill="x")
     info_var = tk.StringVar()
-    tk.Label(det, textvariable=info_var, bg="#ffffff", fg="#3c4043", font=FONT,
-             anchor="w", justify="left").pack(fill="x")
+    info_lbl = tk.Label(det, textvariable=info_var, bg="#ffffff", fg="#3c4043", font=FONT,
+                        anchor="w", justify="left")
+    info_lbl.pack(fill="x")
+    det.bind("<Configure>", lambda e: info_lbl.configure(wraplength=max(200, e.width - 24)))
     seg_canvas = tk.Canvas(det, height=int(18 * S), highlightthickness=1,
                            highlightbackground="#c6ccd5", bg="#eef1f5")
     seg_canvas.pack(fill="x", pady=(int(4 * S), 0))
@@ -333,6 +342,7 @@ def run_gui(initial_url=None):
     menu.add_cascade(label="Move to queue", menu=move_menu)
     menu.add_separator()
     menu.add_command(label="Copy link", command=copy_url)
+    menu.add_command(label="Copy error message", command=copy_error)
     menu.add_command(label="Delete", command=do_delete)
 
     def popup(ev):
@@ -340,6 +350,8 @@ def run_gui(initial_url=None):
         if row and row not in tree.selection():
             tree.selection_set(row)
         fill_move_menu()
+        has_err = any(d.status == "Error" for d in selected())
+        menu.entryconfigure("Copy error message", state="normal" if has_err else "disabled")
         menu.tk_popup(ev.x_root, ev.y_root)
 
     tree.bind("<Button-3>", popup)
@@ -1154,7 +1166,7 @@ def run_gui(initial_url=None):
         pct = f"{min(100.0, d.downloaded * 100 / d.size):.1f}%" \
             if d.size and d.size > 0 else ""
         if d.status == "Error":
-            return "Error: " + d.error
+            return "Error: " + short_error(d.error)
         if d.status == "Processing":
             return "Merging / converting…"
         if d.status == "Downloading":
@@ -1346,7 +1358,12 @@ def run_gui(initial_url=None):
 
         sel = selected()
         d = sel[0] if sel else None
-        if d:
+        if d and d.status == "Error":
+            hint = error_hint(d.error)
+            info_var.set(f"{d.filename or d.url}\nError: {d.error}"
+                         + (f"\nWhat to do: {hint}" if hint else "")
+                         + "\n(Right-click → Copy error message to send it to someone.)")
+        elif d:
             parts = len(d.segments_snapshot())
             hosts = 1 + len(d.mirrors)
             info_var.set(f"{d.filename or d.url}   •   {human_size(d.downloaded)} of "
