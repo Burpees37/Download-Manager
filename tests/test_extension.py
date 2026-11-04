@@ -33,4 +33,7 @@ def test_catch_rules():
                    "recent": ["cancelled:why", "skipped:why", "taken:-", "taken:-"],
                    "recentNames": ["game.zip", "game.zip", "Notes.txt"],
                    "driveButton": "Original file from Google Drive|false",
-                   "appDown": "suggest"}
+                   "appDown": "suggest",
+                   # 1.10.0: next episode in the same tab gets the new stream
+                   "ep1": ["ep1/master.m3u8"], "ep2": ["ep2/master.m3u8"],
+                   "reloaded": ["ep.site/watch"], "ep3": ["ep3/master.m3u8"]}

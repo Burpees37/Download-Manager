@@ -60,11 +60,45 @@ CATEGORY_ICON = {"Compressed": "box", "Programs": "app", "Videos": "film", "Musi
                  "Documents": "doc", "Other": "file"}
 
 
-def rounded_rect(c, x0, y0, x1, y1, r, **kw):
+try:                                            # smooth (anti-aliased) shapes
+    from PIL import Image, ImageDraw, ImageTk
+    SMOOTH = [True]
+except Exception:                               # without Pillow: Tk's own polygons
+    SMOOTH = [False]
+_KEEP = 400                                     # shapes remembered per canvas
+
+
+def _shape_image(c, w, h, r, fill, outline, width):
+    """A rounded rectangle drawn 3x bigger and scaled down, so its edges are
+    smooth. Each canvas keeps the ones it uses (most recently used last)."""
+    key = (w, h, round(r, 1), fill, outline, round(width, 1))
+    keep = c.__dict__.setdefault("_jm_shapes", {})
+    img = keep.pop(key, None)
+    if img is None:
+        ss = 2 if w * h > 150000 else 3
+        big = Image.new("RGBA", (w * ss, h * ss), (0, 0, 0, 0))
+        ImageDraw.Draw(big).rounded_rectangle(
+            [0, 0, w * ss - 1, h * ss - 1], radius=max(0, r * ss), fill=fill or None,
+            outline=outline or None, width=max(1, int(round(width * ss))) if outline else 0)
+        img = ImageTk.PhotoImage(big.resize((w, h), Image.Resampling.LANCZOS), master=c)
+        if len(keep) >= _KEEP:
+            del keep[next(iter(keep))]          # forget the longest-unused shape
+    keep[key] = img
+    return img
+
+
+def rounded_rect(c, x0, y0, x1, y1, r, fill="", outline="", width=1, **kw):
     r = max(0, min(r, (x1 - x0) / 2, (y1 - y0) / 2))
+    w, h = int(round(x1 - x0)), int(round(y1 - y0))
+    if SMOOTH[0] and w >= 2 and h >= 2 and (fill or outline):
+        try:
+            return c.create_image(int(round(x0)), int(round(y0)), anchor="nw",
+                                  image=_shape_image(c, w, h, r, fill, outline, width))
+        except Exception:
+            SMOOTH[0] = False                   # something's off: draw the old way
     pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
            x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
-    return c.create_polygon(pts, smooth=True, **kw)
+    return c.create_polygon(pts, smooth=True, fill=fill, outline=outline, width=width, **kw)
 
 
 _icon_source = [None]          # Theme.icon, once a window exists

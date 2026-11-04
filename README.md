@@ -72,7 +72,15 @@ A command bar at the top (Add URL, Resume, Stop, Stop all, Delete, Video, Schedu
 
 Menus, dropdowns and message boxes are the app's own, so they match in light and dark too. Icons are Microsoft's [Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons) (MIT licence, notice in `jmdm_app/icons`), packed into a tiny font by `tools/make_icon_font.py`.
 
-**Light or dark:** follows Windows by default. Switch it with the moon/sun button, or in *Options → General → Appearance*. Dialogs follow too, using the Windows 11-style Sun Valley theme.
+**Light or dark:** follows Windows by default. Switch it with the moon/sun button, or in *Options → General → Appearance*. Dialogs follow too, using the Windows 11-style Sun Valley theme. The moon/sun button switches with an animation: the new theme spreads out in a circle from the button, with a golden glow going light and an indigo glow with stars going dark. It's skipped when Windows' *Animation effects* are off.
+
+### The Add download window
+The top of the window says what the link is: its type, name, size or video length, the site, and whether it can pause and resume. Pasted or copied links are checked in the background, so you can press **Download now** straight away. Downloads caught from the browser aren't checked again, because some sites give out links that only work once.
+- **Videos:** pick the quality, and for playlists switch on **Whole playlist** (it shows how many videos there are). *Only* takes `1-20` or `3,5,9`.
+- **Episode pages:** switch on **Whole season**.
+- **Save to** shows the free space. It remembers the last folder per type of file, so the folder you use for episodes doesn't change where games or programs go.
+- **More options:** queue, connections, mirror links, and the referer and cookies sent by the browser (**Edit** to change them).
+- **Buttons:** **Download now** starts it right away. **Add to queue ⌄** puts it in one of your queues, or adds it paused. **Cancel** lets the browser download it as usual.
 
 Keys: **Ctrl+N** add, **Ctrl+F** search, **Del** delete, **Enter** open, **Ctrl+A** select all, arrows to move.
 
@@ -83,7 +91,7 @@ Downloads are sorted by file type into **Compressed, Programs, Videos, Music, Do
 - The **Main queue** always runs, with *Downloads at the same time* from Options.
 - Make more queues in **Scheduler** (toolbar, or *Tasks → Scheduler*), for example **Tonight**: start it at 01:00 on the days you pick, stop it at 07:00 if you like, and choose what happens when it's done: nothing, close the app, sleep, or shut down. Before closing, sleeping or shutting down you get a 60-second countdown with **Cancel**.
 - Each queue has its own *Downloads at the same time* — handy for game parts: put them in a queue that runs one or two at a time.
-- Put a download in a queue from the **Queue** box in the Add dialog, or right-click → **Move to queue**. Start or stop a queue from the toolbar's **Start queue**, the **Queues** menu or by right-clicking it in the sidebar.
+- Put a download in a queue with **Add to queue ⌄** (or *More options → Queue*) in the Add download window, or right-click → **Move to queue**. Start or stop a queue from the toolbar's **Start queue**, the **Queues** menu or by right-clicking it in the sidebar.
 - When a queue stops, unfinished files wait in it and continue from where they were at the next start. A schedule that was missed because the PC was off or asleep doesn't fire hours late.
 
 ## How to download…
@@ -95,8 +103,8 @@ Downloads are sorted by file type into **Compressed, Programs, Videos, Music, Do
 | **File host (UploadHaven, Mediafire…)** | Open the link in your browser, finish the timer and click the site's Download button. The extension catches the real file. |
 | **Same file on several hosts** | Start it from one host. Then click Download on the other host's page. The app notices the file has the same size and asks to use it as a mirror. You can also right-click a download → **Add mirror link…**, or paste extra links into the *Mirrors* box. |
 | **YouTube / Facebook video** | Click **⬇ Download video** on the player, paste the link into the app, or use the extension popup. |
-| **Video on any other site** | Press play, then click **⬇ Download video** on the player. If the page plays several streams, pick one from the list. |
-| **YouTube playlist / channel** | Paste the link. The app recognises playlist links and ticks **Whole playlist / channel** for you. For a single video that sits inside a playlist, you choose. If a link turns out not to be a real playlist (for example a YouTube Mix), it downloads the single video instead. *Only items* takes `1-20` or `3,5,9`. Videos are numbered and saved in a folder named after the playlist. |
+| **Video on any other site** | Press play, then click **⬇ Download video** on the player. If the page plays several streams, pick one from the list; the one playing now is at the top. Going to the next episode in the same tab gives you the new episode's video, not the previous one. |
+| **YouTube playlist / channel** | Paste the link. The app recognises playlist links, switches on **Whole playlist** for you and shows how many videos it has. For a single video that sits inside a playlist, you choose. If a link turns out not to be a real playlist (for example a YouTube Mix), it downloads the single video instead. *Only items* takes `1-20` or `3,5,9`. Videos are numbered and saved in a folder named after the playlist. |
 | **Whole season from a series page** | On a page with a cover and numbered episode links (1, 2, 3… or "Episode 1"…), right-click → **Download all episodes on this page**, or paste the page into the app and tick **Whole season**. The app opens each episode, finds its video (MP4, HLS stream or embedded player) and downloads them in order into a folder named after the series: `Show - E01.mp4`, `Show - E02.mp4`…, plus `cover.jpg`. *Only items* (e.g. `1-6`) limits which episodes. Stray numbered links, like a year or comment pages, are ignored. Using right-click also works when the episode list is built by JavaScript. |
 | **Game in many parts** | Add every part. 3 download at a time and the rest queue (change this in Settings). |
 
@@ -147,6 +155,7 @@ Settings and the download list are stored in `jmdm_data` next to the app.
 | `updates.py` | yt-dlp and app updates |
 | `schedule.py` | Categories, queues and the scheduler's clock |
 | `gui.py`, `gui_widgets.py`, `gui_theme.py` / `cli.py` | The window, its drawn parts (command bar, sidebar, list, details card) and light/dark colours / command-line mode |
+| `gui_add.py`, `gui_fx.py`, `gui_popups.py` | The Add download window / the light/dark animation (Pillow) / the app's own menus, dropdowns and message boxes |
 | `gdrive.py` | Google Drive and Docs links and Drive's in-between pages |
 | `config.py`, `util.py` | Shared names and small helpers |
 

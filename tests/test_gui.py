@@ -1,5 +1,7 @@
 """Opens the real window for a few seconds, clicks through it and fails on any
 error inside it. Skipped where Tk or a display isn't available."""
+import os
+
 import pytest
 
 tk = pytest.importorskip("tkinter")
@@ -33,6 +35,8 @@ def test_window_runs(tmp_path, monkeypatch, server):
         self.settings["queues"].append(q)
     monkeypatch.setattr(manager.Manager, "__init__", mgr_init)
     monkeypatch.setattr(gui, "Manager", manager.Manager)
+    from jmdm_app import gui_fx
+    monkeypatch.setattr(gui_fx, "DURATION", 0.2)       # the light/dark animation
     real_loop = tk.Tk.mainloop
     seen = {}
 
@@ -117,3 +121,107 @@ def test_window_runs(tmp_path, monkeypatch, server):
     assert "signed-in browser" in seen["details"]
     assert seen["menu_closed"] and seen["copied"] == seen["a_url"]
     assert seen.get("dropdown") and seen["box"] is True
+
+
+@pytest.mark.skipif(not _can_open(), reason="no display")
+def test_add_dialog(tmp_path, monkeypatch, server):
+    """The Add download window: checks a pasted link in the background, remembers
+    the folder per type, and its three answers do what they say."""
+    from jmdm_app import gui, gui_add, manager, schedule
+    monkeypatch.setattr(manager, "app_dir", lambda: str(tmp_path))
+    errors = []
+    monkeypatch.setattr(tk.Tk, "report_callback_exception",
+                        lambda self, *exc: errors.append(exc))
+    real_mgr = manager.Manager.__init__
+    games, shows = str(tmp_path / "Games"), str(tmp_path / "Shows")
+
+    def mgr_init(self, *a, **k):
+        real_mgr(self, *a, **k)
+        self.settings.update(download_dir=str(tmp_path / "dl"), clipboard_watch=False,
+                             auto_update_ytdlp=False, check_app_updates=False,
+                             listen_port=0, theme="light", last_dirs={"Videos": shows})
+        self.settings["queues"].append(schedule.new_queue("Tonight"))
+    monkeypatch.setattr(manager.Manager, "__init__", mgr_init)
+    monkeypatch.setattr(gui, "Manager", manager.Manager)
+    asked = []
+
+    def fake_video(url, ref="", cookie="", ua="", video=False):
+        asked.append(url)
+        return {"kind": "video", "title": "Episode 2", "duration": 1420, "height": 1080,
+                "count": 12}
+    real_loop = tk.Tk.mainloop
+    seen = {}
+
+    def loop(self, n=0):
+        U = gui.UI
+        m = U["mgr"]
+        tonight = m.settings["queues"][1]["id"]
+        dl = {}
+
+        def file_link():
+            dl["d"] = U["add_dialog"](server.url("/file/game.rar?size=300000"))
+
+        def file_checked():
+            d = dl["d"]
+            seen["file_known"] = (d.known.get("kind"), d.known.get("size"), d.name_v.get())
+            seen["file_badge"] = d.header.state["badge"][0]
+            d.dir_v.set(games)
+            d.dir_touched = True
+            d.submit(start=False)                                  # Add paused
+
+        def again():
+            dl["d"] = U["add_dialog"](server.url("/file/other.rar?size=1000"))
+            seen["remembered_rar"] = dl["d"].dir_v.get()
+            dl["d"].cancel()
+
+        def video_link():
+            gui_add.AddDialog.probe = staticmethod(fake_video)
+            dl["v"] = U["add_dialog"]("https://www.youtube.com/watch?v=abc&list=PLx")
+            seen["video_dir"] = dl["v"].dir_v.get()
+
+        def video_checked():
+            v = dl["v"]
+            seen["video_title"] = v.header.state["title"]
+            seen["pl_label"] = v.pl_chk.cget("text")
+            v.q_v.set("720p")
+            v.queue_menu()                                        # Add to queue ▾ opens
+            v.submit(start=True, qid=tonight)
+
+        def browser_job():
+            job = {"size": 5_000_000}
+            d = U["add_dialog"]("https://host.example/dl/7", "setup.exe", "https://host.example/",
+                                "sid=1", "", False, from_browser=True, job=job)
+            seen["job_not_probed"] = not d.checking and d.known.get("size") == 5_000_000
+            seen["job_season"] = d.season_ok
+            d.cancel()
+
+        def done():
+            ds = {os.path.basename(x.filename or x.url): x for x in m.downloads}
+            seen["downloads"] = sorted((x.status, x.queue == tonight, x.folder)
+                                       for x in m.downloads)
+            seen["ds"] = ds
+
+        steps = [file_link, None, None, file_checked, again, video_link, None, video_checked,
+                 browser_job, done]
+        for i, f in enumerate(steps):
+            if f:
+                self.after(900 + 500 * i, f)
+        self.after(900 + 500 * len(steps) + 300, lambda: (m.shutdown(), self.destroy()))
+        real_loop(self, n)
+    monkeypatch.setattr(tk.Tk, "mainloop", loop)
+    real_probe = gui_add.AddDialog.probe
+    try:
+        gui.run_gui()
+    finally:
+        gui_add.AddDialog.probe = real_probe
+    assert not errors, errors
+    assert seen["file_known"] == ("file", 300000, "game.rar")
+    assert seen["file_badge"] == "Resumable"
+    assert seen["remembered_rar"] == games                    # per type: archives
+    assert seen["video_dir"] == shows                         # videos have their own
+    assert seen["video_title"] == "Episode 2" and "12 videos" in seen["pl_label"]
+    assert asked == ["https://www.youtube.com/watch?v=abc&list=PLx"]
+    assert seen["job_not_probed"] and seen["job_season"] is False
+    st = seen["downloads"]
+    assert ("Paused", False, games) in st
+    assert any(s == "Queued" and t and f == shows for s, t, f in st), st

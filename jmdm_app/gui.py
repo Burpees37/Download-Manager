@@ -9,13 +9,12 @@ import queue
 import threading
 import urllib.parse
 from .config import APP_NAME, BUILD, DEFAULT_CAPTURE_TYPES, MAX_CONNECTIONS, VERSION
-from .util import clean_err, default_download_dir, error_hint, find_ffmpeg, human_size, human_time, is_playlist_url, is_video_url, is_whole_playlist_url, sanitize, short_error
+from .util import clean_err, default_download_dir, error_hint, find_ffmpeg, human_size, human_time, is_video_url, is_whole_playlist_url, sanitize, short_error
 from .gates import looks_like_download
 from .updates import APP_UPDATE_ZIP, _ytdlp_source, update_log_tail, app_update_available, have_ytdlp, prepare_app_update, run_app_update, update_ytdlp, ytdlp_version
 from .integration import register_browser_integration
 from .browser import decision_expired, settle
 from .manager import Manager
-from . import gdrive
 from .schedule import CATEGORY_NAMES, DAYS, MAIN, WHEN_DONE, describe, download_category, new_queue, parse_hhmm
 
 # Filled by run_gui: the main pieces, for the window test.
@@ -45,6 +44,8 @@ def run_gui(initial_url=None):
     import tkinter as tk
     from tkinter import ttk, filedialog
     from .gui_popups import Boxes, Dropdown, PopupMenu
+    from .gui_fx import ThemeSwitch
+    from .gui_add import AddDialog
     from .gui_theme import Theme, load_icon_fonts, ui_scale
     from .gui_widgets import (CATEGORY_ICON, CommandButton, DetailsCard, DownloadList,
                               IconButton, NavList, SpeedChip, StatusBar, use_icon_font)
@@ -245,12 +246,18 @@ def run_gui(initial_url=None):
         popup_under(btn["More"], m)
 
     def toggle_theme():
+        """Switch light/dark with the sunrise / nightfall animation."""
         mode = "light" if theme.dark else "dark"
-        mgr.settings["theme"] = mode
-        mgr.mark_dirty()
-        theme.set_mode(mode)
-        btn["Theme"].icon = "sun" if theme.dark else "moon"
-        btn["Theme"].draw()
+
+        def apply():
+            mgr.settings["theme"] = mode
+            mgr.mark_dirty()
+            theme.set_mode(mode)
+            btn["Theme"].icon = "sun" if theme.dark else "moon"
+            btn["Theme"].draw()
+            refresh_now()
+
+        ThemeSwitch(root, btn["Theme"], mode == "dark", apply, S).start()
 
     # ---- command bar -----------------------------------------------------
     bar = tk.Frame(root, bd=0)
@@ -492,235 +499,13 @@ def run_gui(initial_url=None):
     def add_dialog(url="", filename="", referer="", cookie="", user_agent="",
                    video=None, from_browser=False, season=False, series_links=None,
                    job=None):
-        # job: a browser download held until this dialog is answered
-        win = new_dialog()
-        win.title("Add download")
-        win.resizable(True, False)
-        frm = ttk.Frame(win, padding=14)
-        frm.pack(fill="both", expand=True)
-        frm.columnconfigure(1, weight=1)
-
-        if not url:
-            try:
-                clip = root.clipboard_get().strip()
-                if re.match(r"^https?://\S+$", clip):
-                    url = clip
-            except Exception:
-                pass
-        url_v = tk.StringVar(value=url)
-        name_v = tk.StringVar(value=filename)
-        default_dir = mgr.settings["download_dir"]
-        dir_v = tk.StringVar(value=default_dir)
-        conn_v = tk.IntVar(value=mgr.settings["connections"])
-        ref_v = tk.StringVar(value=referer)
-        cookie_v = tk.StringVar(value=cookie)
-        vid_v = tk.BooleanVar(value=is_video_url(url) if video is None else video)
-        q_v = tk.StringVar(value=mgr.settings["video_quality"])
-        start_v = tk.BooleanVar(value=True)
-        pl_v = tk.BooleanVar(value=is_whole_playlist_url(url))
-        season_v = tk.BooleanVar(value=season)
-        items_v = tk.StringVar(value="")
-        qnames = [q["name"] for q in mgr.settings["queues"]]
-        qids = [q["id"] for q in mgr.settings["queues"]]
-        pick = side_queue() or MAIN
-        queue_v = tk.StringVar(value=qnames[qids.index(pick)])
-
-        r = 0
-        if from_browser:
-            ttk.Label(frm, text="Download caught from your browser",
-                      font=("Segoe UI", 10, "bold")).grid(row=r, column=0, columnspan=3,
-                                                          sticky="w", pady=(0, 8))
-            r += 1
-        ttk.Label(frm, text="Link:").grid(row=r, column=0, sticky="w")
-        e_url = ttk.Entry(frm, textvariable=url_v, width=70)
-        e_url.grid(row=r, column=1, columnspan=2, sticky="ew", pady=3)
-        r += 1
-        ttk.Label(frm, text="Save as:").grid(row=r, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=name_v).grid(row=r, column=1, columnspan=2,
-                                                 sticky="ew", pady=3)
-        r += 1
-        ttk.Label(frm, text="(leave blank to use the server's file name)",
-                  style="Hint.TLabel").grid(row=r, column=1, sticky="w")
-        r += 1
-        ttk.Label(frm, text="Folder:").grid(row=r, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=dir_v).grid(row=r, column=1, sticky="ew", pady=3)
-        ttk.Button(frm, text="Browse…",
-                   command=lambda: dir_v.set(filedialog.askdirectory(
-                       initialdir=dir_v.get(), parent=win) or dir_v.get())
-                   ).grid(row=r, column=2, padx=(6, 0))
-        r += 1
-        if mgr.settings.get("category_folders"):
-            ttk.Label(frm, text="(the default folder means: sorted into its category "
-                                "folder, e.g. \\Programs)", style="Hint.TLabel"
-                      ).grid(row=r, column=1, sticky="w")
-            r += 1
-        crow = ttk.Frame(frm)
-        crow.grid(row=r, column=0, columnspan=3, sticky="w", pady=3)
-        ttk.Label(crow, text="Connections:").pack(side="left")
-        ttk.Spinbox(crow, from_=1, to=MAX_CONNECTIONS, textvariable=conn_v,
-                    width=6).pack(side="left", padx=(8, 18))
-        ttk.Label(crow, text="Queue:").pack(side="left")
-        Dropdown(crow, theme, textvariable=queue_v, values=qnames,
-                     width=18).pack(side="left", padx=(8, 0))
-        r += 1
-        vrow = ttk.Frame(frm)
-        vrow.grid(row=r, column=0, columnspan=3, sticky="w", pady=3)
-        ttk.Checkbutton(vrow, text="Video site (YouTube, Facebook…)",
-                        variable=vid_v).pack(side="left")
-        ttk.Label(vrow, text="   Quality:").pack(side="left")
-        Dropdown(vrow, theme, textvariable=q_v, width=8,
-                     values=("best", "max", "8K", "4K", "1440p", "1080p", "720p",
-                             "480p", "audio")).pack(side="left")
-        r += 1
-        prow = ttk.Frame(frm)
-        prow.grid(row=r, column=0, columnspan=3, sticky="w", pady=3)
-        pl_chk = ttk.Checkbutton(prow, text="Whole playlist / channel", variable=pl_v)
-        pl_chk.pack(side="left")
-        ttk.Label(prow, text="   Only items:").pack(side="left")
-        ttk.Entry(prow, textvariable=items_v, width=14).pack(side="left")
-        ttk.Label(prow, text="  e.g. 1-20 or 3,5,9 (blank = all)",
-                  style="Hint.TLabel").pack(side="left")
-        r += 1
-        season_chk = ttk.Checkbutton(
-            frm, variable=season_v,
-            text="Whole season — follow the numbered episode links on this page "
-                 "(uses “Only items” too)")
-        season_chk.grid(row=r, column=0, columnspan=3, sticky="w", pady=3)
-        r += 1
-        ttk.Label(frm, text="Mirrors:").grid(row=r, column=0, sticky="nw", pady=3)
-        mir_txt = tk.Text(frm, height=3, width=60, wrap="none", font=("Consolas", 9))
-        theme.style_text_widget(mir_txt)
-        mir_txt.grid(row=r, column=1, columnspan=2, sticky="ew", pady=3)
-        r += 1
-        ttk.Label(frm, text="Optional: other links to the SAME file on other hosts, one per "
-                            "line. Each host's speed adds up.",
-                  style="Hint.TLabel").grid(row=r, column=1, columnspan=2, sticky="w")
-        r += 1
-        adv = ttk.LabelFrame(frm, text="Advanced (filled in automatically by the extension)",
-                             padding=8)
-        adv.grid(row=r, column=0, columnspan=3, sticky="ew", pady=(8, 4))
-        adv.columnconfigure(1, weight=1)
-        ttk.Label(adv, text="Referer:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(adv, textvariable=ref_v).grid(row=0, column=1, sticky="ew", pady=2)
-        ttk.Label(adv, text="Cookies:").grid(row=1, column=0, sticky="w")
-        ttk.Entry(adv, textvariable=cookie_v, show="•").grid(row=1, column=1,
-                                                             sticky="ew", pady=2)
-        r += 1
-        start_chk = ttk.Checkbutton(frm, text="Start now", variable=start_v)
-        start_chk.grid(row=r, column=0, columnspan=2, sticky="w")
-        btns = ttk.Frame(frm)
-        btns.grid(row=r, column=1, columnspan=2, sticky="e", pady=(8, 0))
-
-        def on_queue_change(*_):
-            main = qids[qnames.index(queue_v.get())] == MAIN
-            start_chk.configure(text="Start now" if main else
-                                "Add to the queue (starts when the queue runs)")
-
-        queue_v.trace_add("write", on_queue_change)
-        on_queue_change()
-
-        def ok():
-            u = url_v.get().strip()
-            if not re.match(r"^https?://", u):
-                messagebox.showerror("Add download", "Paste a link that starts with http(s)://",
-                                     parent=win)
-                return
-            try:
-                conns = int(conn_v.get())
-            except Exception:
-                conns = mgr.settings["connections"]
-            if job is not None and not settle(job, True):
-                messagebox.showinfo("Add download", "The browser already downloaded this "
-                                    "file because nobody answered in time.", parent=win)
-                win.destroy()
-                return
-            last_clip[0] = u
-            qid = qids[qnames.index(queue_v.get())]
-            folder = dir_v.get().strip()
-            if folder == default_dir and mgr.settings.get("category_folders"):
-                folder = None                          # let the category decide
-            start = start_v.get()
-            if season_v.get() and not is_video_url(u):
-                mgr.add_series(u, folder, conns, q_v.get(),
-                               ref_v.get().strip(), cookie_v.get().strip(), user_agent,
-                               items=items_v.get(), start=start, queue=qid,
-                               links=series_links)
-                win.destroy()
-                return
-            if vid_v.get() and pl_v.get() and is_playlist_url(u):
-                mgr.add_playlist(u, folder, conns, q_v.get(),
-                                 ref_v.get().strip(), cookie_v.get().strip(), user_agent,
-                                 items=items_v.get(), start=start, queue=qid)
-                win.destroy()
-                return
-            mirrors = [x.strip() for x in mir_txt.get("1.0", "end").splitlines()
-                       if re.match(r"^https?://", x.strip())]
-            d = mgr.add(u, folder, name_v.get().strip(), conns,
-                        ref_v.get().strip(), cookie_v.get().strip(), user_agent,
-                        video=vid_v.get(), quality=q_v.get(), start=start,
-                        mirrors=mirrors, queue=qid)
-            win.destroy()
-            pending_select[0] = d.id
-
-        def on_url_change(*_):
-            u = url_v.get().strip()
-            if gdrive.looks_like_file_link(u):
-                conn_v.set(min(conn_v.get() or 8, gdrive.MAX_CONNECTIONS))
-            page_like = bool(re.match(r"^https?://", u)) and not is_video_url(u) \
-                and not gdrive.looks_like_file_link(u) and not re.search(r"\.(zip|rar|7z|exe|msi|iso|apk|mp4|mkv|webm|m3u8|mpd|mp3|pdf)"
-                                  r"(\?|$)", urllib.parse.urlsplit(u).path + "?", re.I)
-            season_chk.state(["!disabled"] if page_like else ["disabled"])
-            if not page_like:
-                season_v.set(False)
-            vid_v.set(is_video_url(u) or (vid_v.get() and not re.match(r"^https?://", u)))
-            if is_playlist_url(u):
-                pl_chk.state(["!disabled"])
-                if is_whole_playlist_url(u):
-                    pl_v.set(True)
-                    pl_chk.configure(text="Whole playlist / channel")
-                else:
-                    # a single video that sits inside a playlist: user chooses
-                    pl_chk.configure(text="Whole playlist (this video is part of one)")
-            else:
-                pl_v.set(False)
-                pl_chk.state(["disabled"])
-                pl_chk.configure(text="Whole playlist / channel")
-
-        url_v.trace_add("write", on_url_change)
-        on_url_change()
-        if video:
-            vid_v.set(True)
-        ttk.Button(btns, text="Download", command=ok).pack(side="left", padx=4)
-
-        def cancel():
-            if job is not None:
-                settle(job, False)                     # the browser downloads it instead
-            win.destroy()
-
-        def watch_expiry():
-            try:
-                if not win.winfo_exists():
-                    return
-            except tk.TclError:
-                return                                 # dialog already closed
-            if decision_expired(job):
-                win.destroy()                          # timed out: the browser kept it
-                mgr.notice = "No answer in time — the browser downloaded it instead"
-                return
-            win.after(1000, watch_expiry)
-
-        if job is not None:
-            ttk.Label(frm, text="Cancel lets the browser download it as usual.",
-                      style="Hint.TLabel").grid(row=r + 1, column=0, columnspan=3, sticky="w")
-            win.after(1000, watch_expiry)
-        ttk.Button(btns, text="Cancel", command=cancel).pack(side="left")
-        win.protocol("WM_DELETE_WINDOW", cancel)
-        win.bind("<Return>", lambda e: ok())
-        win.bind("<Escape>", lambda e: cancel())
-        show_dialog(win)
-        e_url.focus_set()
-        win.attributes("-topmost", True)
-        win.after(300, lambda: win.attributes("-topmost", False))
+        # job: a browser download held until this window is answered
+        ctx = {"root": root, "theme": theme, "mgr": mgr, "S": S, "new_dialog": new_dialog,
+               "show_dialog": show_dialog, "messagebox": messagebox, "side_queue": side_queue,
+               "last_clip": last_clip, "pending_select": pending_select,
+               "site_name": site_name, "scheduler_dialog": scheduler_dialog}
+        return AddDialog(ctx, url, filename, referer, cookie, user_agent, video,
+                         from_browser, season, series_links, job)
 
     def scheduler_dialog(new=False, select=None):
         """Queues and their schedules, like IDM's Scheduler window."""

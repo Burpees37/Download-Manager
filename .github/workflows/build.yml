@@ -20,7 +20,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install build tools
-        run: python -m pip install --upgrade pyinstaller yt-dlp certifi sv-ttk pytest
+        run: python -m pip install --upgrade pyinstaller yt-dlp certifi sv-ttk pillow pytest
 
       # A build is only published when every test passes, so auto-update
       # never hands out a broken version.

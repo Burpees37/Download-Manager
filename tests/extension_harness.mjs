@@ -11,6 +11,7 @@ globalThis.chrome = {
              sendNativeMessage: async () => ({ ok: false }) },
   webRequest: { onBeforeRequest: ev("obr"), onHeadersReceived: ev("ohr") },
   tabs: { onUpdated: ev("tu"), onRemoved: ev("tr"), sendMessage: async () => {} },
+  webNavigation: { onCommitted: ev("wnc") },
   contextMenus: { onClicked: ev("cm"), removeAll: async () => {}, create() {} },
   action: { setBadgeBackgroundColor() {}, setBadgeText() {} },
   cookies: { getAll: async () => [] },
@@ -63,5 +64,18 @@ out.recentNames = rec.recent.slice(0, 3).map(x => x.name);
 const ch = await new Promise(r => listeners.om({ type: "choices", frameUrl: "" },
   { tab: { id: 9, url: "https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz012345/view", title: "x" } }, r));
 out.driveButton = ch.choices.map(c => c.label + "|" + c.video).join(";");
+// episode sites: the player frame moves on to the next episode
+const seen = (url, frameId, ct = "application/vnd.apple.mpegurl") => listeners.ohr(
+  { tabId: 5, frameId, statusCode: 200, url, responseHeaders: [{ name: "content-type", value: ct }] });
+const pick = async () => (await new Promise(r => listeners.om({ type: "choices", frameUrl: "https://ep.site/watch" },
+  { tab: { id: 5, url: "https://ep.site/watch", title: "Show" } }, r))).choices.map(c => c.url.split("/").slice(-2).join("/"));
+seen("https://cdn.x/ep1/master.m3u8", 3);
+out.ep1 = await pick();
+seen("https://cdn.x/ep2/master.m3u8", 3);                   // same player, new stream
+out.ep2 = await pick();
+listeners.wnc({ tabId: 5, frameId: 3 });                    // player frame reloaded for ep 3
+out.reloaded = await pick();
+seen("https://cdn.x/ep3/master.m3u8", 4);
+out.ep3 = await pick();
 appUp = false; await new Promise(r => setTimeout(r, 3100)); out.appDown = await run(base);
 console.log(JSON.stringify(out));

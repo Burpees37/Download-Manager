@@ -391,8 +391,17 @@ api.webRequest.onHeadersReceived.addListener((d) => {
   if (kind === "HLS" && [...list.values()].some(m => m.kind === "HLS" && host(m.url) === host(url))
       && /chunklist|index_\d|_\d{3,4}p|\/\d{3,4}\//i.test(url)) return;
   if (!list.has(key)) {
+    const stream = kind === "HLS" || kind === "DASH";
+    if (stream) {
+      // a new stream in the same player = the player moved on (next episode):
+      // the old one's stream is no longer what's playing
+      for (const [k, m] of list) {
+        if ((m.kind === "HLS" || m.kind === "DASH") && m.frameId === d.frameId) list.delete(k);
+      }
+    }
     list.set(key, { url, kind, size: total, ext: (ct.split("/")[1] || "").replace("x-", ""),
-                    referer: d.initiator || d.documentUrl || "", ts: Date.now() });
+                    referer: d.initiator || d.documentUrl || "", ts: Date.now(),
+                    frameId: d.frameId });
     if (list.size > 30) list.delete(list.keys().next().value);
     api.tabs.sendMessage(d.tabId, { type: "media-found", count: list.size }).catch(() => {});
   }
@@ -401,6 +410,16 @@ api.webRequest.onHeadersReceived.addListener((d) => {
 api.tabs.onUpdated.addListener((tabId, info) => {
   if (info.url) media.delete(tabId);              // new page: forget the old one's media
 });
+// Episode sites often swap only the player frame for the next episode (the
+// tab's address stays the same): forget what that frame played before.
+if (api.webNavigation) {
+  api.webNavigation.onCommitted.addListener((d) => {
+    if (d.frameId === 0) { media.delete(d.tabId); return; }
+    const list = media.get(d.tabId);
+    if (!list) return;
+    for (const [k, m] of list) if (m.frameId === d.frameId) list.delete(k);
+  });
+}
 api.tabs.onRemoved.addListener((tabId) => media.delete(tabId));
 
 // Pick what the "Download video" button should download.
@@ -418,9 +437,10 @@ function choicesFor(tab, frameUrl, src) {
     out.push({ label: "This video (best quality)", url: page, video: true });
     return out;                                   // yt-dlp handles these sites fully
   }
+  // streams first, then the newest (what's playing now), then the biggest
   const found = [...mediaFor(tab.id).values()].sort((a, b) =>
     (a.kind === "HLS" || a.kind === "DASH" ? -1 : 0) - (b.kind === "HLS" || b.kind === "DASH" ? -1 : 0)
-    || b.size - a.size);
+    || b.ts - a.ts || b.size - a.size);
   for (const m of found) {
     const stream = m.kind === "HLS" || m.kind === "DASH";
     const size = m.size && !stream ? ` · ${(m.size / 1048576).toFixed(1)} MB` : "";
