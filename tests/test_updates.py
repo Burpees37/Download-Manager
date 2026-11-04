@@ -173,3 +173,63 @@ def test_app_update_really_swaps_files(isolated, server, monkeypatch):
     finally:
         if running.poll() is None:
             running.kill()
+
+
+FAKE_APP = r'''
+import sys, traceback, tkinter as tk
+from jmdm_app import updates
+here, zip_url = sys.argv[1], sys.argv[2]
+updates.app_dir = lambda: here
+updates.APP_UPDATE_ZIP = zip_url
+root = tk.Tk()
+def go():
+    try:
+        bat, _ = updates.prepare_app_update()
+        updates.run_app_update(bat)
+    except Exception:
+        open(here + "\\fake_error.txt", "w").write(traceback.format_exc())
+    root.destroy()
+root.after(300, go)
+root.mainloop()
+'''
+
+
+@pytest.mark.skipif(os.name != "nt", reason="builds and runs a real windowed .exe (Windows)")
+def test_packaged_app_updates_itself(isolated, server, tmp_path_factory):
+    """Like the real app: a one-file, windowed (no console) PyInstaller .exe
+    that downloads the update, starts the swap script and closes."""
+    import shutil
+    import subprocess
+    import time
+    pytest.importorskip("PyInstaller")
+    build = tmp_path_factory.mktemp("fakebuild")
+    (build / "fakeapp.py").write_text(FAKE_APP)
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed",
+                    "--name", "fakeapp", "--paths", repo, "--distpath", str(build / "dist"),
+                    "--workpath", str(build / "work"), "--specpath", str(build),
+                    str(build / "fakeapp.py")], check=True, capture_output=True, timeout=600)
+    app = isolated
+    os.makedirs(app / "jmdm_data")
+    exe = app / "JM Download Manager.exe"
+    shutil.copy(build / "dist" / "fakeapp.exe", exe)
+    new_exe = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "HOSTNAME.EXE")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.write(new_exe, "JM Download Manager.exe")
+        z.writestr("README.md", "new")
+    server.httpd.blobs["zip"] = buf.getvalue()
+    subprocess.Popen([str(exe), str(app), server.url("/blob?b=zip")])
+    log = app / "jmdm_data" / "update.log"
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        if log.exists() and "starting the app" in log.read_text(errors="replace"):
+            break
+        if (app / "fake_error.txt").exists():
+            break
+        time.sleep(0.5)
+    err = (app / "fake_error.txt").read_text() if (app / "fake_error.txt").exists() else ""
+    text = log.read_text(errors="replace") if log.exists() else "(no log)"
+    assert not err, err
+    assert "starting the app" in text and "FAILED" not in text, text
+    assert exe.read_bytes() == open(new_exe, "rb").read(), text
