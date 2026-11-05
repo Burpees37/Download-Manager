@@ -63,6 +63,10 @@ out.recent = rec.recent.slice(0, 4).map(x => x.result + ":" + (x.reason ? "why" 
 out.recentNames = rec.recent.slice(0, 3).map(x => x.name);
 const ch = await new Promise(r => listeners.om({ type: "choices", frameUrl: "" },
   { tab: { id: 9, url: "https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz012345/view", title: "x" } }, r));
+const fb = await new Promise(r => listeners.om({ type: "choices", frameUrl: "https://www.facebook.com/",
+  videoUrl: "https://www.facebook.com/watch/?v=123" },
+  { tab: { id: 9, url: "https://www.facebook.com/", title: "(1) Facebook" } }, r));
+out.fbFeed = fb.choices.map(c => c.url + "|" + c.video).join(";") + "|title=" + fb.title;
 out.driveButton = ch.choices.map(c => c.label + "|" + c.video).join(";");
 // episode sites: the player frame moves on to the next episode
 const seen = (url, frameId, ct = "application/vnd.apple.mpegurl") => listeners.ohr(

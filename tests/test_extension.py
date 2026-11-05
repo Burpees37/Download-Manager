@@ -36,4 +36,6 @@ def test_catch_rules():
                    "appDown": "suggest",
                    # 1.10.0: next episode in the same tab gets the new stream
                    "ep1": ["ep1/master.m3u8"], "ep2": ["ep2/master.m3u8"],
-                   "reloaded": ["ep.site/watch"], "ep3": ["ep3/master.m3u8"]}
+                   "reloaded": ["ep.site/watch"], "ep3": ["ep3/master.m3u8"],
+                   # 1.8.1: a feed video sends its own address, not the feed's
+                   "fbFeed": "https://www.facebook.com/watch/?v=123|true|title="}

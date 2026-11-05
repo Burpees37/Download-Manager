@@ -5,8 +5,10 @@
   const api = globalThis.browser ?? chrome;
 
   let enabled = true;
-  let dismissed = false;
+  const dismissed = new WeakSet();     // videos you closed the button on (✕)
   let host = null, root = null, btn = null, menu = null, current = null;
+  let hovered = null;                  // the video under the mouse pointer
+  let overButton = false;
 
   api.storage.local.get("button").then(({ button = true }) => { enabled = button; place(); });
   api.storage.onChanged.addListener((c) => {
@@ -41,11 +43,22 @@
     btn = root.querySelector(".go");
     menu = root.querySelector(".menu");
     root.querySelector(".x").addEventListener("click", (e) => {
-      e.stopPropagation(); dismissed = true; place();
+      e.stopPropagation();
+      if (current) dismissed.add(current);
+      if (hovered === current) hovered = null;
+      place();
     });
     btn.addEventListener("click", onClick);
+    host.addEventListener("pointerenter", () => { overButton = true; });
+    host.addEventListener("pointerleave", () => { overButton = false; });
     Object.assign(host.style, { position: "fixed", zIndex: 2147483647, display: "none" });
     document.documentElement.appendChild(host);
+  }
+
+  function usable(v, minW, minH) {
+    const r = v.getBoundingClientRect();
+    return r.width >= minW && r.height >= minH && r.bottom > 40 && r.top < innerHeight - 40
+      && !dismissed.has(v) && getComputedStyle(v).visibility !== "hidden";
   }
 
   function bestVideo() {
@@ -53,37 +66,90 @@
     for (const v of document.querySelectorAll("video")) {
       const r = v.getBoundingClientRect();
       const a = r.width * r.height;
-      if (r.width >= 220 && r.height >= 120 && r.bottom > 40 && r.top < innerHeight - 40
-          && getComputedStyle(v).visibility !== "hidden" && a > area) {
-        best = v; area = a;
+      if (usable(v, 220, 120) && a > area) { best = v; area = a; }
+    }
+    return best;
+  }
+
+  // The video under the pointer. Sites like Facebook cover their players with
+  // see-through layers, so the mouse is never "on" the video itself: look for
+  // a video whose box holds the pointer instead.
+  function videoAt(x, y) {
+    let best = null, area = Infinity;
+    for (const v of document.querySelectorAll("video")) {
+      const r = v.getBoundingClientRect();
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom && usable(v, 140, 90)) {
+        const a = r.width * r.height;
+        if (a < area) { best = v; area = a; }      // the innermost one
       }
     }
     return best;
   }
 
+  let moveQueued = false;
+  addEventListener("pointermove", (e) => {
+    if (moveQueued || overButton) return;
+    moveQueued = true;
+    const x = e.clientX, y = e.clientY;
+    requestAnimationFrame(() => {
+      moveQueued = false;
+      const v = videoAt(x, y);
+      if (v !== hovered) { hovered = v; place(); }
+    });
+  }, { passive: true, capture: true });
+
   function place() {
-    const v = enabled && !dismissed ? bestVideo() : null;
+    if (hovered && !(hovered.isConnected && usable(hovered, 140, 90))) hovered = null;
+    const v = !enabled ? null : (hovered || (overButton && current) || bestVideo());
     if (!v) {
       if (host) host.style.display = "none";
       current = null;
       return;
     }
     if (!host) build();
+    if (v !== current && menu) menu.hidden = true;
     current = v;
     const r = v.getBoundingClientRect();
+    const narrow = r.width < 260;
+    if (!btn.dataset.busy) btn.textContent = narrow ? "⬇ Download" : "⬇ Download video";
+    const w = narrow ? 140 : 200;
     host.style.display = "block";
-    host.style.top = Math.max(6, r.top + 10) + "px";
-    host.style.left = Math.max(6, Math.min(innerWidth - 230, r.right - 210)) + "px";
+    // inside the video's visible part, under any fixed top bar
+    host.style.top = Math.max(64, Math.min(r.bottom - 44, r.top + 10)) + "px";
+    host.style.left = Math.max(6, Math.min(innerWidth - w - 20, r.right - w - 10)) + "px";
+  }
+
+  // The video's own address, for players inside a feed (the tab's address is
+  // the feed, which the video finder can't use).
+  const POST_LINK = /^https:\/\/(www\.|m\.|web\.)?facebook\.com\/(reel\/\d+|[^?#]*\/videos\/(\w+\/)?\d+|watch\/?\?v=\d+)/;
+  function videoLink(v) {
+    if (!v || !/(^|\.)facebook\.com$/.test(location.hostname)) return "";
+    const tagged = v.closest("[data-video-id]");
+    const id = tagged && tagged.getAttribute("data-video-id");
+    if (id && /^\d+$/.test(id)) return "https://www.facebook.com/watch/?v=" + id;
+    let el = v.parentElement;
+    for (let i = 0; el && i < 12; i++, el = el.parentElement) {
+      const found = new Set();
+      for (const a of el.querySelectorAll("a[href]")) {
+        const m = POST_LINK.exec(a.href);
+        if (m) found.add(m[0]);
+      }
+      if (found.size === 1) return [...found][0];
+      if (found.size > 1) return "";              // several videos: can't tell which
+    }
+    return "";
   }
 
   function say(text) {
     btn.textContent = text;
-    setTimeout(() => { btn.textContent = "⬇ Download video"; }, 2500);
+    btn.dataset.busy = "1";
+    setTimeout(() => { delete btn.dataset.busy; place(); }, 2500);
   }
 
   function grab(choice, title) {
     menu.hidden = true;
     btn.textContent = "Sending…";
+    btn.dataset.busy = "1";
     api.runtime.sendMessage({ type: "grab", url: choice.url, referer: choice.referer || location.href,
                               video: choice.video, title })
       .then(r => say(r && r.ok ? "Sent to app ✓" : "App not running"))
@@ -94,13 +160,14 @@
     e.stopPropagation();
     if (!menu.hidden) { menu.hidden = true; return; }
     const src = current && current.currentSrc;
+    const videoUrl = videoLink(current);
     let r;
     try {
-      r = await api.runtime.sendMessage({ type: "choices", frameUrl: location.href, src });
+      r = await api.runtime.sendMessage({ type: "choices", frameUrl: location.href, src, videoUrl });
     } catch (err) { return say("Reload the page"); }
     const choices = (r && r.choices) || [];
     if (choices.length === 1) return grab(choices[0], r.title);
-    menu.innerHTML = "";
+    menu.replaceChildren();
     if (!choices.length) {
       const n = document.createElement("div");
       n.className = "note";

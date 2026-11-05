@@ -423,9 +423,14 @@ if (api.webNavigation) {
 api.tabs.onRemoved.addListener((tabId) => media.delete(tabId));
 
 // Pick what the "Download video" button should download.
-function choicesFor(tab, frameUrl, src) {
+function choicesFor(tab, frameUrl, src, videoUrl) {
   const out = [];
   const page = tab && tab.url;
+  if (videoUrl && isVideoSite(videoUrl)) {
+    // the player's own video inside a feed (Facebook): not the feed's address
+    out.push({ label: "This video (best quality)", url: videoUrl, video: true });
+    return out;
+  }
   if (frameUrl && isVideoSite(frameUrl) && frameUrl !== page) {
     out.push({ label: "Embedded video (best quality)", url: frameUrl, video: true });
   }
@@ -529,7 +534,8 @@ api.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.type === "choices") {                   // from the page button / popup
     const tabP = sender.tab ? Promise.resolve(sender.tab)
                             : api.tabs.get(msg.tabId);
-    tabP.then(tab => reply({ choices: choicesFor(tab, msg.frameUrl, msg.src), title: tab.title }));
+    tabP.then(tab => reply({ choices: choicesFor(tab, msg.frameUrl, msg.src, msg.videoUrl),
+                               title: msg.videoUrl ? "" : tab.title }));
     return true;
   }
   if (msg.type === "season") {
